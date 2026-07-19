@@ -1,7 +1,7 @@
 {
   "name": "@rijverse/ctx",
-  "version": "0.1.0",
-  "description": "Context portability tool for AI coding CLIs (Claude Code, puku-cli, Gemini, Codex, Aider). Export and import session context between CLIs via a portable JSON envelope.",
+  "version": "0.2.0",
+  "description": "Manage multiple Claude CLI accounts and share context (projects, settings, skills) across them via a canonical store.",
   "type": "module",
   "bin": {
     "ctx": "./dist/cli.js"
@@ -24,25 +24,20 @@
   },
   "keywords": [
     "cli",
-    "ai",
-    "context",
     "claude-code",
-    "puku-cli",
-    "gemini",
-    "codex",
-    "aider",
-    "portability"
+    "claude",
+    "context",
+    "accounts",
+    "symlink",
+    "config"
   ],
   "license": "MIT",
   "dependencies": {
-    "better-sqlite3": "^11.3.0",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
-    "zod": "^3.23.8",
-    "zod-to-json-schema": "^3.23.2"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.7.4",
     "typescript": "^5.6.2",
     "vitest": "^2.1.1"

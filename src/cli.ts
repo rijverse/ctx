@@ -1,15 +1,17 @@
 #!/usr/bin/env node
-import { Command, CommanderError, Option } from "commander";
+import { Command, CommanderError } from "commander";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { detectCommand } from "./commands/detect.js";
-import { listCommand } from "./commands/list.js";
-import { showCommand } from "./commands/show.js";
-import { exportCommand } from "./commands/export.js";
-import { importCommand } from "./commands/import.js";
-import { schemaCommand } from "./commands/schema.js";
-import { ToolNameSchema, type ToolName } from "./schema/portable.js";
+import chalk from "chalk";
+import type { GlobalOpts } from "./commands/_util.js";
+import { accountsCommand } from "./commands/accounts.js";
+import { initCommand } from "./commands/init.js";
+import { statusCommand } from "./commands/status.js";
+import { linkCommand } from "./commands/link.js";
+import { unlinkCommand } from "./commands/unlink.js";
+import { repairCommand } from "./commands/repair.js";
+import { runCommand } from "./commands/run.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let version = "0.0.0";
@@ -18,125 +20,129 @@ try {
     readFileSync(join(__dirname, "..", "package.json"), "utf8")
   ) as { version?: string };
   if (pkg.version) version = pkg.version;
-} catch (err) {
-  console.warn(`ctx: could not read version from package.json: ${(err as Error).message}`);
+} catch {
+  // running from an odd layout; version stays 0.0.0
 }
 
-const TOOLS: ToolName[] = ToolNameSchema.options;
+function globals(cmd: Command): GlobalOpts {
+  const o = cmd.optsWithGlobals() as Record<string, unknown>;
+  return {
+    dryRun: o.dryRun as boolean | undefined,
+    yes: o.yes as boolean | undefined,
+    json: o.json as boolean | undefined,
+    verbose: o.verbose as boolean | undefined,
+    config: o.config as string | undefined,
+    store: o.store as string | undefined,
+  };
+}
 
-/** A reusable --tool option that validates against the ToolName enum. */
-const toolOption = (description: string) =>
-  new Option(`-t, --tool <tool>`, description).choices(TOOLS);
+// The common flags are registered on every command (and the root) so they work
+// whether placed before or after the subcommand.
+const addCommon = (c: Command): Command =>
+  c
+    .option("--dry-run", "show what would happen without changing anything")
+    .option("-y, --yes", "skip confirmation prompts")
+    .option("--json", "emit JSON where supported")
+    .option("--verbose", "more detail")
+    .option("--config <path>", "path to ctx.config.json")
+    .option("--store <path>", "shared store directory");
 
 const program = new Command();
 program
   .name("ctx")
-  .description("Export and import AI coding session context between CLIs")
-  .version(version);
+  .description("Manage Claude CLI accounts and share context across them")
+  .version(version)
+  .enablePositionalOptions();
+addCommon(program);
 
-program
-  .command("detect")
-  .description("Detect which CLIs have sessions for a project")
-  .argument("[path]", "project directory (defaults to cwd)")
-  .action((path?: string) => detectCommand(path));
+addCommon(
+  program
+    .command("accounts")
+    .alias("ls")
+    .description("List Claude account dirs and their link status")
+).action((_o: unknown, cmd: Command) => accountsCommand(globals(cmd)));
 
-program
-  .command("list")
-  .description("List sessions for the current project")
-  .argument("[path]", "project directory (defaults to cwd)")
-  .addOption(toolOption("source tool"))
-  .option("-n, --recent <n>", "show only the N most recent", (v: string) => parseInt(v, 10))
-  .option("--json", "emit JSON")
-  .action((path: string | undefined, opts: { tool?: ToolName; recent?: number; json?: boolean }) => {
-    return listCommand({
-      tool: opts.tool,
-      recent: opts.recent,
-      cwdArg: path,
-      json: opts.json,
-    });
-  });
+addCommon(
+  program
+    .command("init")
+    .description("Create and seed the shared store, choosing what to sync")
+    .option("--from <account>", "account to seed the store from")
+).action((o: { from?: string }, cmd: Command) =>
+  initCommand(globals(cmd), { from: o.from })
+);
 
-program
-  .command("show")
-  .description("Show a summary of a specific session")
-  .argument("<session-id>", "session id (or prefix)")
-  .argument("[path]", "project directory (defaults to cwd)")
-  .addOption(toolOption("source tool"))
-  .action((id: string, path: string | undefined, opts: { tool?: ToolName }) => {
-    return showCommand(id, { tool: opts.tool, cwdArg: path });
-  });
+addCommon(
+  program
+    .command("status")
+    .description("Show per-account, per-item link state")
+    .argument("[account]", "limit to one account")
+).action((account: string | undefined, _o: unknown, cmd: Command) =>
+  statusCommand(globals(cmd), account)
+);
 
+addCommon(
+  program
+    .command("link")
+    .description("Link an account's shared items into the store")
+    .argument("[account]", "account name (or use --all)")
+    .option("--all", "link every account")
+    .option("--only <items...>", "limit to specific shared items")
+    .option("--force", "overwrite diverged files (store wins)")
+    .option("--no-backup", "do not back up replaced entries")
+).action(
+  (
+    account: string | undefined,
+    o: { all?: boolean; only?: string[]; force?: boolean; backup?: boolean },
+    cmd: Command
+  ) =>
+    linkCommand(globals(cmd), account, {
+      all: o.all,
+      only: o.only,
+      force: o.force,
+      backup: o.backup,
+    })
+);
+
+addCommon(
+  program
+    .command("unlink")
+    .description("Restore an account's independent copies from the store")
+    .argument("[account]", "account name (or use --all)")
+    .option("--all", "unlink every account")
+    .option("--only <items...>", "limit to specific shared items")
+).action(
+  (
+    account: string | undefined,
+    o: { all?: boolean; only?: string[] },
+    cmd: Command
+  ) => unlinkCommand(globals(cmd), account, { all: o.all, only: o.only })
+);
+
+addCommon(
+  program
+    .command("repair")
+    .description("Fix broken or wrong-target symlinks")
+    .argument("[account]", "account name (or use --all)")
+    .option("--all", "repair every account")
+).action((account: string | undefined, o: { all?: boolean }, cmd: Command) =>
+  repairCommand(globals(cmd), account, { all: o.all })
+);
+
+// run passes everything after the account through to claude, so it keeps the
+// common flags off itself (place them before `run`, e.g. `ctx --store X run …`).
 program
-  .command("export")
-  .description("Export a session to a portable JSON file")
-  .argument("<session-id>", "session id (or prefix)")
-  .argument("[path]", "project directory (defaults to cwd)")
-  .addOption(toolOption("source tool"))
-  .option("-o, --output <file>", "output file (default: ./ctx-handoff-<id8>.json)")
-  .option("--redact", "strip tool_result bodies (for shareable exports)")
-  .action(
-    (
-      id: string,
-      path: string | undefined,
-      opts: { tool?: ToolName; output?: string; redact?: boolean }
-    ) => {
-      return exportCommand(id, {
-        tool: opts.tool,
-        output: opts.output,
-        cwdArg: path,
-        redact: opts.redact,
-      });
-    }
+  .command("run")
+  .description("Launch claude for an account (sets CLAUDE_CONFIG_DIR)")
+  .argument("<account>", "account name")
+  .argument("[claudeArgs...]", "arguments passed through to claude")
+  .passThroughOptions()
+  .action((account: string, claudeArgs: string[], _o: unknown, cmd: Command) =>
+    runCommand(globals(cmd), account, claudeArgs ?? [])
   );
 
-program
-  .command("import")
-  .description("Import a portable JSON into a target CLI's workflow")
-  .argument("<file>", "portable JSON file (from `ctx export`)")
-  .addOption(new Option("--to <tool>", "target tool").choices(TOOLS).makeOptionMandatory(true))
-  .option("--target-cwd <path>", "target working directory (defaults to session.cwd)")
-  .option("--write-native", "also write a synthetic native JSONL (claude/puku only)")
-  .option("--dry-run", "show what would happen without writing files")
-  .option("--decision <text>", "add a decision to carry forward (repeatable)", collectDecisions, [])
-  .action(
-    (
-      file: string,
-      opts: {
-        to: ToolName;
-        targetCwd?: string;
-        writeNative?: boolean;
-        dryRun?: boolean;
-        decision: string[];
-      }
-    ) => {
-      return importCommand(file, {
-        targetTool: opts.to,
-        targetCwd: opts.targetCwd,
-        writeNative: opts.writeNative,
-        dryRun: opts.dryRun,
-        decisions: opts.decision,
-      });
-    }
-  );
-
-program
-  .command("schema")
-  .description("Print the portable JSON Schema")
-  .action(() => {
-    schemaCommand();
-  });
-
-function collectDecisions(value: string, previous: string[]): string[] {
-  return previous.concat(value);
-}
-
-program.parseAsync(process.argv).catch((err: Error) => {
-  // Commander throws for usage errors (unknown options, missing required
-  // args, invalid choices) with a structured exit code, which we honor.
-  // For everything else, print the error and exit 1.
-  if (err instanceof CommanderError) {
-    process.exit(err.exitCode);
-  }
-  console.error(err);
+program.parseAsync(process.argv).catch((err: unknown) => {
+  if (err instanceof CommanderError) process.exit(err.exitCode);
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(chalk.red(msg));
   process.exit(1);
 });

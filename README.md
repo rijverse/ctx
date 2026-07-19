@@ -1,139 +1,134 @@
-# ctx: context portability for AI coding CLIs
+# ctx
 
-You use multiple AI coding CLIs (Claude Code, puku-cli, Gemini CLI, Codex CLI, Aider). When you switch CLIs mid-task, your conversation context is gone. You re-explain the project, re-paste file contents, re-state constraints.
+Manage multiple Claude CLI accounts and share context across them.
 
-`ctx` is a standalone CLI that **exports** a session from one CLI into a portable JSON envelope, and **imports** it into another CLI's workflow as a paste-friendly markdown handoff (and, optionally, as a synthetic native JSONL for Claude/puku).
+Claude Code keeps both its config and its context in one directory (default
+`~/.claude`, overridable with `CLAUDE_CONFIG_DIR`). If you run more than one
+account, for example:
 
-## v0.1 status
+```sh
+CLAUDE_CONFIG_DIR=~/.claude-work claude
+```
 
-- ✅ Adapters: **claude** (Claude Code), **puku** (puku-cli)
-- ✅ Commands: `detect`, `list`, `show`, `export`, `import`, `schema`
-- ✅ Streaming everywhere (handles 100 MB+ sessions)
-- ✅ `--write-native` for synthetic JSONL on Claude/puku
-- ✅ `--redact` for shareable exports
-- ✅ `--decision` to carry forward notes/decisions
-- 🔜 v0.2: gemini + codex adapters
-- 🔜 v0.3: aider adapter + `--summarize`
+then each account has its own isolated directory, and your session history
+(`projects/`), skills, rules, and settings are siloed per account. `ctx` fixes
+that: it keeps each account's identity separate (credentials and auth) while
+sharing the context and reusable assets through one canonical store, using
+symlinks.
+
+## How it works
+
+A single store at `~/.claude-shared/` holds the real copies of the shared
+items. Each account directory gets a symlink into the store:
+
+```
+~/.claude-shared/projects/        <- real files live here
+~/.claude/projects        -> ~/.claude-shared/projects
+~/.claude-work/projects   -> ~/.claude-shared/projects
+```
+
+Identity and account-scoped state stay per account and are never touched:
+`.credentials.json`, `.claude.json`, `policy-limits.json`, `remote-settings.json`,
+`settings.local.json`, and the various caches.
 
 ## Install
 
-```bash
-npm install -g @rijverse/ctx
-# or for development:
+Requires Node 20+.
+
+```sh
 npm install
 npm run build
-npm link
+npm link        # optional, puts `ctx` on your PATH
 ```
 
-Requires Node.js 20+.
+Or run it directly: `node dist/cli.js <command>`.
 
-## Usage
+## Quick start
 
-```bash
-# 1. Detect which CLIs have sessions for the current project
-cd ~/your-project
-ctx detect
-
-# 2. List sessions
-ctx list                       # most recent first
-ctx list --tool claude --recent 5
-ctx list --json
-
-# 3. Show a session summary
-ctx show 70311239              # by id or prefix
-
-# 4. Export a session to portable JSON
-ctx export 70311239 -o handoff.json
-ctx export 70311239 --redact -o handoff.json   # strip tool_result bodies
-
-# 5. Import into another CLI
-ctx import handoff.json --to puku                          # markdown handoff
-ctx import handoff.json --to puku --write-native           # also synthetic JSONL
-ctx import handoff.json --to puku --dry-run                # preview
-ctx import handoff.json --to puku \
-  --decision "Use TypeScript strict" \
-  --decision "Prefer functional components"
+```sh
+ctx init            # create the store, pick what to sync, seed from ~/.claude
+ctx link --all      # symlink every account into the store
+ctx status          # check the result
+ctx run work        # launch: CLAUDE_CONFIG_DIR=~/.claude-work claude
 ```
 
-## The portable schema
+`ctx init` is interactive: it lists the shareable items it finds and lets you
+toggle which ones to sync before writing the config. Pass `-y` to accept the
+defaults non-interactively.
 
-`ctx schema` emits the portable session schema as JSON Schema. The shape:
+## Commands
 
-```json
-{
-  "schema_version": "1.0",
-  "source": { "tool": "claude|puku|gemini|codex|aider", "version": "...", "exported_at": "ISO8601" },
-  "session": { "id": "...", "started_at": "...", "cwd": "...", "git_branch": "...", "model": "..." },
-  "system": "string | [ContentBlock]",
-  "messages": [{ "role": "user|assistant|system", "content": "string | [ContentBlock]", ... }],
-  "tools": [...],
-  "decisions": ["optional, user-provided context to carry forward"]
-}
+| Command | What it does |
+|---|---|
+| `ctx accounts` (alias `ls`) | List account dirs and a link-status rollup. |
+| `ctx init [--from <account>]` | Create and seed the store; choose what to sync. |
+| `ctx link [account] [--all] [--only <items...>] [--force] [--no-backup]` | Merge an account's items into the store, back up the originals, and replace them with symlinks. |
+| `ctx unlink [account] [--all] [--only <items...>]` | Replace symlinks with independent real copies of the current store content. |
+| `ctx status [account]` | Per-account, per-item state (linked / unlinked / adoptable / broken). |
+| `ctx repair [account] [--all]` | Fix broken or wrong-target symlinks. |
+| `ctx run <account> [-- <claude args...>]` | Launch `claude` for an account. |
+
+Global flags (usable before or after the subcommand): `--dry-run`, `-y/--yes`,
+`--json`, `--verbose`, `--config <path>`, `--store <path>`.
+
+Every destructive command prints its plan first. Without `-y` it asks once
+before proceeding; `--dry-run` shows the plan and changes nothing.
+
+## What gets shared
+
+Defaults (shared when present, skipped when absent):
+
+- Directories: `projects`, `todos`, `commands`, `agents`, `output-styles`,
+  `skills`, `rules`, `plugins`, `plans`
+- Files: `settings.json`, `CLAUDE.md`, `history.jsonl`
+
+You choose the actual set during `ctx init`. It is stored in
+`~/.claude-shared/ctx.config.json`, which you can edit by hand. The tool refuses
+to share anything listed as protected (`neverTouch`), so a bad edit cannot turn
+your credentials into a symlink.
+
+## Safety
+
+- Real replacements always run in the order merge/seed, then back up, then
+  symlink, so the store holds a superset before the account's copy is removed.
+  An interrupted run is safe to re-run.
+- Originals are moved to `~/.claude-shared/.ctx-backups/<account>/<timestamp>/`
+  before being replaced. Use `--no-backup` to skip.
+- When a file (for example `CLAUDE.md`) differs between an account and the
+  store, the store wins. `ctx link` skips such files unless you pass `--force`
+  (or `-y`); the account's version is preserved in the backup either way.
+- `unlink` never depends on backups; it copies the live store content back out.
+
+## Caveats
+
+- Two `claude` processes writing to the shared `projects/` at once is fine:
+  sessions are separate files with unique ids. Prefer to close running sessions
+  before `link`/`unlink`, since the move/replace step could race a live writer.
+- `history.jsonl` and `plugins/` are shareable but higher risk (append races and
+  per-account repo paths, respectively). They are in the defaults because they
+  were opted in; uncheck them in `ctx init` if you would rather not.
+- Session transcripts become physically shared, but each account's
+  `.claude.json` still holds its own project registry and per-project trust.
+  Sessions show up from the `projects/` directory on disk; project-level trust
+  and MCP settings remain per account.
+- Linux, Node 20+. Windows and macOS symlink behavior is out of scope for now.
+
+## Testing
+
+Unit and integration tests run against temporary directories and never touch
+your real `~/.claude*`:
+
+```sh
+npm test
 ```
 
-`ContentBlock` is a discriminated union aligned with Anthropic's content-block model: `text`, `thinking`, `redacted_thinking`, `tool_use`, `tool_result`. This gives the best round-trip fidelity with Claude-flavored CLIs.
+An end-to-end check runs entirely inside a container against a throwaway home:
 
-## Import strategies
-
-`ctx import` always writes a `.ctx-handoff.md` next to your project's target cwd. Paste that into the new CLI as initial context.
-
-For Claude Code and puku-cli, you can also pass `--write-native` to drop a synthetic JSONL into the CLI's own `~/.claude/projects/<encodedCwd>/` (or `~/.puku-cli/projects/...`) directory. The synthetic chain mimics the real schema (with a fresh `last-prompt` pointing at the leaf) so the CLI treats it as a brand-new session and appends to it.
-
-**Caveats for `--write-native`:**
-
-- The synthetic chain uses generated UUIDs, not the originals from the source CLI.
-- The `parentUuid` chain is rebuilt from scratch in conversation order; tools that diff sessions may notice.
-- Only Claude Code and puku-cli are supported; for Gemini/Codex/Aider, use the markdown handoff.
-
-## Privacy
-
-`ctx` never makes network calls. All processing is local.
-
-Use `--redact` on export to strip tool_result bodies (which may contain file contents, command output, or secrets) before sharing.
-
-## Architecture
-
-```
-src/
-├── schema/portable.ts        # zod schema for the portable envelope
-├── adapters/                 # one Adapter per CLI
-│   ├── types.ts              # Adapter interface, SessionRef, ImportOptions
-│   ├── claude-family.ts      # shared base for Claude Code + puku-cli
-│   ├── claude.ts, puku.ts    # thin shells over the family base
-│   └── registry.ts           # auto-registers and detects adapters
-├── normalizers/
-│   └── claude-jsonl.ts       # reconstructs the conversation thread by
-│                             # walking parentUuid from the last-prompt
-├── render/
-│   ├── markdown-handoff.ts   # → paste-friendly Markdown
-│   └── native-claude.ts      # → synthetic JSONL for claude/puku
-├── io/
-│   ├── readJsonlStream.ts    # line-streamed JSON parser
-│   └── paths.ts              # cwd encoding, root dir resolution
-└── commands/                 # one file per subcommand
-    ├── detect.ts
-    ├── list.ts
-    ├── show.ts
-    ├── export.ts
-    ├── import.ts
-    └── schema.ts
+```sh
+docker build -f test/docker/Dockerfile -t ctx-e2e .
+docker run --rm ctx-e2e
 ```
 
-## Development
+## Status
 
-```bash
-npm install
-npm run build      # tsc → dist/
-npm test           # vitest run
-npm run test:watch
-npm run lint       # tsc --noEmit
-```
-
-## Roadmap
-
-- **v0.2**: Gemini CLI + Codex CLI adapters. Gemini needs `$set` patch replay; Codex needs `state_*.sqlite` version-globbing and dynamic `pragma_table_info` SELECTs. Auto-populate `decisions` from Codex `memories_*.sqlite.rollout_summary`.
-- **v0.3**: Aider markdown parser (synthesize IDs from `cwd + firstUserLine + fileMtime`). `--summarize` flag with BYO model endpoint for `decisions` auto-population. `ctx diff <a> <b>` for round-trip sanity checks.
-
-## License
-
-MIT
+This focuses on the Claude CLI. Support for other AI CLIs may come later.

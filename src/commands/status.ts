@@ -1,92 +1,143 @@
-import chalk from "chalk";
-import type { PlannedAction } from "../types.js";
-import { type GlobalOpts, fail, loadFromGlobals, out } from "./_util.js";
-import { discoverAccounts } from "../core/accounts.js";
-import { planLink } from "../core/plan.js";
+import { join } from "node:path";
+import type { EntryState, Profile } from "../types.js";
+import { loadConfig } from "../core/config.js";
+import { INVENTORY, itemByName } from "../core/inventory.js";
+import { stateOf } from "../core/plan.js";
+import { tilde } from "../core/paths.js";
+import { listProfiles } from "../core/profiles.js";
+import { describe } from "../core/registry.js";
+import { readSlice } from "../core/session.js";
+import type { Parsed } from "../util/args.js";
+import { dirSize, exists } from "../util/fsx.js";
+import { bold, cyan, dim, green, out, pad, red, yellow } from "../util/ui.js";
+import { globals } from "./_context.js";
 
-export async function statusCommand(
-  g: GlobalOpts,
-  accountArg?: string
-): Promise<void> {
-  const config = await loadFromGlobals(g);
-  const all = await discoverAccounts(config);
-  const accounts = accountArg ? all.filter((a) => a.name === accountArg) : all;
-  if (accountArg && !accounts.length) {
-    fail(`unknown account "${accountArg}"`);
-    process.exitCode = 1;
-    return;
+export async function status(args: Parsed): Promise<number> {
+  const g = globals(args);
+  const config = await loadConfig(g.store);
+
+  if (config === undefined) {
+    if (g.json) {
+      out(JSON.stringify({ store: g.store, initialized: false }, null, 2));
+      return 1;
+    }
+    out(`${yellow("No store")} at ${cyan(tilde(g.store))}`);
+    out(dim("Run `ctx init` to create one."));
+    return 1;
   }
 
-  let problems = 0;
-  const report: { name: string; isDefault: boolean; actions: PlannedAction[] }[] = [];
-  for (const a of accounts) {
-    const actions = await planLink(config, a, config.sharedItems);
-    report.push({ name: a.name, isDefault: a.isDefault, actions });
-    for (const x of actions) {
-      if (x.entryState === "BROKEN" || x.entryState === "WRONG_TARGET") problems++;
+  const profiles = await listProfiles(config, g.store);
+  const rows: { profile: Profile; states: Map<string, EntryState> }[] = [];
+
+  for (const profile of profiles) {
+    const states = new Map<string, EntryState>();
+    for (const name of config.shared) {
+      states.set(name, await stateOf(join(profile.dir, name), join(g.store, name)));
     }
+    rows.push({ profile, states });
   }
 
   if (g.json) {
     out(
       JSON.stringify(
         {
-          store: config.storePath,
-          accounts: report.map((r) => ({
-            name: r.name,
-            isDefault: r.isDefault,
-            items: r.actions.map((x) => ({
-              name: x.item.name,
-              entryState: x.entryState,
-              storeState: x.storeState,
-              diverged: x.diverged ?? false,
-            })),
+          store: g.store,
+          initialized: true,
+          shared: config.shared,
+          registryKeys: config.registryKeys,
+          profiles: rows.map((r) => ({
+            name: r.profile.name,
+            dir: r.profile.dir,
+            registry: r.profile.registryPath,
+            items: Object.fromEntries(r.states),
           })),
         },
         null,
-        2
-      )
+        2,
+      ),
     );
-    if (problems) process.exitCode = 1;
-    return;
+    return 0;
   }
 
-  out(chalk.dim(`store: ${config.storePath}`));
-  for (const r of report) {
-    const label = r.isDefault ? `${r.name} ${chalk.dim("(default)")}` : r.name;
-    out(chalk.bold(`\n${label}`));
-    const rows = r.actions.filter(
-      (x) => !(x.entryState === "ABSENT" && x.storeState === "STORE_ABSENT")
-    );
-    if (!rows.length) {
-      out(chalk.dim("  (nothing shared yet)"));
-      continue;
-    }
-    for (const x of rows) {
-      const extra = x.diverged ? chalk.dim(" (differs)") : "";
-      out(`  ${x.item.name.padEnd(16)} ${stateLabel(x)}${extra}`);
-    }
+  const slice = await readSlice(g.store);
+  const bytes = await dirSize(g.store);
+
+  out();
+  out(`${bold("Store")}  ${cyan(tilde(g.store))}  ${dim(human(bytes))}`);
+  out(`${dim("registry")}  ${describe(slice.data)}  ${dim(stamp(slice.updatedAt))}`);
+  out();
+
+  const width = Math.max(...config.shared.map((n) => n.length), 8) + 2;
+  const nameWidth = Math.max(...profiles.map((p) => p.name.length), 7) + 2;
+
+  out(`  ${pad(dim("item"), width)}${profiles.map((p) => pad(bold(p.name), nameWidth)).join("")}`);
+  for (const name of config.shared) {
+    const cells = rows.map((r) => pad(mark(r.states.get(name)!), nameWidth));
+    out(`  ${pad(name, width)}${cells.join("")}`);
   }
-  if (problems) {
-    out(chalk.red(`\n${problems} broken/wrong link(s). Run: ctx repair --all`));
-    process.exitCode = 1;
+
+  out();
+  out(dim(`  ${green("link")} into the store   ${yellow("own")} unshared copy   ${dim("-")} absent   ${red("broken")} needs \`ctx doctor\``));
+
+  const unmanaged = await findUnmanaged(profiles, config.shared);
+  if (unmanaged.length > 0) {
+    out();
+    out(`${bold("Not managed by ctx")} ${dim("(left alone)")}`);
+    out(dim(`  ${unmanaged.join("  ")}`));
+  }
+
+  out();
+  for (const profile of profiles) {
+    out(`  ${pad(profile.name, nameWidth)} ${dim(tilde(profile.dir))}`);
+  }
+  out();
+  return 0;
+}
+
+function mark(state: EntryState): string {
+  switch (state) {
+    case "linked":
+      return green("link");
+    case "dir":
+    case "file":
+      return yellow("own");
+    case "absent":
+      return dim("-");
+    case "misdirected":
+      return red("elsewhere");
+    case "dangling":
+      return red("broken");
   }
 }
 
-function stateLabel(x: PlannedAction): string {
-  switch (x.entryState) {
-    case "LINKED":
-      return chalk.green("linked");
-    case "REAL_DIR":
-    case "REAL_FILE":
-      return chalk.yellow("unlinked");
-    case "WRONG_TARGET":
-      return chalk.red("wrong-target");
-    case "BROKEN":
-      return chalk.red("broken");
-    case "ABSENT":
-      return x.storeState === "STORE_PRESENT"
-        ? chalk.cyan("adoptable")
-        : chalk.dim("absent");
+/** Entries ctx knows about but is not sharing, so the picture is honest. */
+async function findUnmanaged(profiles: Profile[], shared: string[]): Promise<string[]> {
+  const names = new Set<string>();
+  for (const item of INVENTORY) {
+    if (item.role !== "shared" || shared.includes(item.name)) continue;
+    for (const p of profiles) {
+      if (await exists(join(p.dir, item.name))) {
+        names.add(item.name);
+        break;
+      }
+    }
   }
+  return [...names].filter((n) => itemByName(n) !== undefined).sort();
+}
+
+function human(bytes: number): string {
+  const units = ["B", "K", "M", "G"];
+  let n = bytes;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)}${units[i]}`;
+}
+
+function stamp(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t) || t === 0) return "never merged";
+  return `merged ${new Date(t).toLocaleString()}`;
 }

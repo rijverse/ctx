@@ -1,37 +1,51 @@
-import { promises as fsp } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-export interface FakeAccountSpec {
-  /** relpath -> file content */
-  files?: Record<string, string>;
-  /** relpaths of empty directories to create */
-  dirs?: string[];
-  /** relpath -> symlink target (absolute or relative to the link) */
-  symlinks?: Record<string, string>;
-  /** relpaths (dirs) to chmod, applied after creation */
-  modes?: Record<string, number>;
+export interface FakeHome {
+  home: string;
+  store: string;
+  dispose(): Promise<void>;
+  /** Create a profile dir with some content. "default" means ~/.claude. */
+  profile(name: string, layout: Record<string, string | string[]>): Promise<string>;
+  registry(name: string, value: unknown): Promise<string>;
 }
 
-/** Materialize an account config dir from a declarative spec. */
-export async function buildAccount(
-  dir: string,
-  spec: FakeAccountSpec
-): Promise<void> {
-  await fsp.mkdir(dir, { recursive: true });
-  for (const d of spec.dirs ?? []) {
-    await fsp.mkdir(join(dir, d), { recursive: true });
-  }
-  for (const [rel, content] of Object.entries(spec.files ?? {})) {
-    const p = join(dir, rel);
-    await fsp.mkdir(dirname(p), { recursive: true });
-    await fsp.writeFile(p, content);
-  }
-  for (const [rel, target] of Object.entries(spec.symlinks ?? {})) {
-    const p = join(dir, rel);
-    await fsp.mkdir(dirname(p), { recursive: true });
-    await fsp.symlink(target, p);
-  }
-  for (const [rel, mode] of Object.entries(spec.modes ?? {})) {
-    await fsp.chmod(join(dir, rel), mode);
-  }
+export async function fakeHome(): Promise<FakeHome> {
+  const home = await mkdtemp(join(tmpdir(), "ctx-test-"));
+  process.env.CTX_HOME = home;
+  const store = join(home, ".ctx-store");
+
+  const dirFor = (name: string) => join(home, name === "default" ? ".claude" : `.claude-${name}`);
+
+  return {
+    home,
+    store,
+    async dispose() {
+      delete process.env.CTX_HOME;
+      await rm(home, { recursive: true, force: true });
+    },
+    async profile(name, layout) {
+      const dir = dirFor(name);
+      await mkdir(dir, { recursive: true });
+      for (const [path, content] of Object.entries(layout)) {
+        const full = join(dir, path);
+        if (Array.isArray(content)) {
+          await mkdir(full, { recursive: true });
+          for (const child of content) await writeFile(join(full, child), `${name}:${child}`);
+        } else {
+          await mkdir(join(full, ".."), { recursive: true });
+          await writeFile(full, content);
+        }
+      }
+      return dir;
+    },
+    async registry(name, value) {
+      const dir = dirFor(name);
+      await mkdir(dir, { recursive: true });
+      const path = name === "default" ? join(home, ".claude.json") : join(dir, ".claude.json");
+      await writeFile(path, JSON.stringify(value, null, 2));
+      return path;
+    },
+  };
 }

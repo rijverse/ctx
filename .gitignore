@@ -7,3 +7,5 @@ dist/
 coverage/
 *.tsbuildinfo
 .idea
+# local one-off helper, not part of the project
+commit.sh

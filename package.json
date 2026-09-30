@@ -1,7 +1,7 @@
 {
   "name": "@rijverse/ctx",
-  "version": "0.2.0",
-  "description": "Manage multiple Claude CLI accounts and share context (projects, settings, skills) across them via a canonical store.",
+  "version": "1.0.0",
+  "description": "One source of truth for every Claude Code account on a machine: shared context, separate logins.",
   "type": "module",
   "bin": {
     "ctx": "./dist/cli.js"
@@ -12,31 +12,27 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/cli.js",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
+    "lint": "tsc --noEmit",
     "start": "node dist/cli.js",
-    "lint": "tsc --noEmit"
+    "pretest": "npm run build"
   },
   "engines": {
     "node": ">=20"
   },
   "keywords": [
-    "cli",
     "claude-code",
     "claude",
-    "context",
+    "cli",
     "accounts",
-    "symlink",
-    "config"
+    "profiles",
+    "context",
+    "symlink"
   ],
   "license": "MIT",
-  "dependencies": {
-    "chalk": "^5.3.0",
-    "commander": "^12.1.0",
-    "zod": "^3.23.8"
-  },
   "devDependencies": {
     "@types/node": "^22.7.4",
     "typescript": "^5.6.2",

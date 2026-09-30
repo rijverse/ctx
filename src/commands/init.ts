@@ -1,100 +1,93 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
-import type { SharedItem } from "../types.js";
-import {
-  type GlobalOpts,
-  chooseSharedItems,
-  confirm,
-  fail,
-  loadFromGlobals,
-  out,
-  success,
-} from "./_util.js";
-import { discoverAccounts, findAccount } from "../core/accounts.js";
-import { assertStoreSafe, ensureStore, seedFromAccount } from "../core/store.js";
-import { writeConfig } from "../config/manifest.js";
-import { pathExists } from "../fs/ops.js";
+import { defaultConfig, loadConfig, saveConfig, type Config } from "../core/config.js";
+import { itemByName } from "../core/inventory.js";
+import { CONFIG_FILE, home, tilde } from "../core/paths.js";
+import { discover } from "../core/profiles.js";
+import { describe } from "../core/registry.js";
+import { readSlice, seedSlice } from "../core/session.js";
+import { flagString, type Parsed } from "../util/args.js";
+import { ensureDir, exists } from "../util/fsx.js";
+import { bold, confirm, cyan, dim, fail, green, out, pad, yellow } from "../util/ui.js";
+import { globals } from "./_context.js";
 
-export async function initCommand(
-  g: GlobalOpts,
-  opts: { from?: string }
-): Promise<void> {
-  const config = await loadFromGlobals(g);
-  const accounts = await discoverAccounts(config);
-  if (!accounts.length) {
-    fail(`no Claude account dirs found under ${config.accountsRoot}`);
-    process.exitCode = 1;
-    return;
+export async function init(args: Parsed): Promise<number> {
+  const g = globals(args);
+  const store = g.store;
+  const existing = await loadConfig(store);
+
+  if (existing !== undefined && !args.flags.has("force")) {
+    out(`Store already set up at ${cyan(tilde(store))}.`);
+    out(dim("`ctx status` to see it, `ctx init --force` to rewrite the config."));
+    return 0;
   }
 
-  try {
-    assertStoreSafe(config.storePath, homedir(), accounts);
-  } catch (err) {
-    fail((err as Error).message);
-    process.exitCode = 1;
-    return;
+  const profiles = await discover(store);
+  if (profiles.length === 0) {
+    fail(`no Claude config directories under ${tilde(home())}. Run claude once first.`);
   }
 
-  const sourceName = opts.from ?? config.seedFrom;
-  const source = findAccount(accounts, sourceName) ?? accounts[0]!;
-
-  const entries = [];
-  for (const item of config.sharedItems) {
-    entries.push({
-      name: item.name,
-      present: await pathExists(join(source.dir, item.name)),
-      checked: true,
-    });
+  const seedName = flagString(args, "from") ?? profiles.find((p) => p.isDefault)?.name ?? profiles[0]!.name;
+  const seed = profiles.find((p) => p.name === seedName);
+  if (seed === undefined) {
+    fail(`--from ${seedName}: no such profile. Found: ${profiles.map((p) => p.name).join(", ")}`);
   }
 
-  const interactive = !g.yes && !g.dryRun && Boolean(process.stdin.isTTY);
-  let chosen: Set<string>;
-  if (interactive) {
-    out(`Seeding shared store from "${source.name}" (${source.dir}).`);
-    out("Select which items to share across accounts:");
-    chosen = await chooseSharedItems(entries);
-  } else {
-    chosen = new Set(config.sharedItems.map((i) => i.name));
+  const config: Config = existing ?? defaultConfig();
+  if (g.only !== undefined) {
+    config.shared = g.only.filter((n) => itemByName(n)?.role === "shared");
   }
 
-  const chosenItems: SharedItem[] = config.sharedItems.filter((i) =>
-    chosen.has(i.name)
-  );
-  const manifest = {
-    ...config.manifest,
-    shared: {
-      directories: chosenItems.filter((i) => i.kind === "dir").map((i) => i.name),
-      files: chosenItems.filter((i) => i.kind === "file").map((i) => i.name),
-    },
-    seedFrom: source.name,
-  };
-
-  const toSeed: string[] = [];
-  for (const it of chosenItems) {
-    if (
-      (await pathExists(join(source.dir, it.name))) &&
-      !(await pathExists(join(config.storePath, it.name)))
-    ) {
-      toSeed.push(it.name);
-    }
+  out();
+  out(`${bold("Store")}  ${cyan(tilde(store))}`);
+  out();
+  out(bold("Profiles"));
+  for (const p of profiles) {
+    const tag = p.name === seed.name ? green("   seeds the store") : "";
+    out(`  ${pad(p.name, 12)} ${dim(pad(tilde(p.dir), 22))}${tag}`);
   }
 
-  out(`\nstore:  ${config.storePath}`);
-  out(`config: ${config.configPath}`);
-  out(`seed from ${source.name}: ${toSeed.join(", ") || "(nothing new)"}`);
+  out();
+  out(bold("Shared"));
+  out(dim("  moved into the store once, then symlinked back into every profile"));
+  for (const name of config.shared) {
+    const item = itemByName(name)!;
+    const mark = (await exists(join(seed.dir, name))) ? green("*") : dim("-");
+    out(`  ${mark} ${pad(name, 18)} ${dim(item.note ?? "")}`);
+  }
+  out(dim(`  * present in ${seed.name}`));
+
+  out();
+  out(bold("Never touched"));
+  out(dim("  .credentials.json  .claude.json  policy-limits.json  remote-settings.json"));
+  out(dim("  stats-cache.json  settings.local.json  and the local caches"));
+
+  out();
+  out(bold(".claude.json"));
+  out(`  ${dim("shared keys")}  ${config.registryKeys.join(", ")}`);
+  out(`  ${dim("per profile")}  oauthAccount, userID, machineID, entitlement caches, everything else`);
+  out();
 
   if (g.dryRun) {
-    out("\n(dry run) no changes written.");
-    return;
+    out(dim("--dry-run: nothing was changed."));
+    return 0;
   }
-  if (!g.yes && interactive && !(await confirm("\nWrite store and config?"))) {
-    out("Aborted.");
-    return;
+  if (!g.yes && !(await confirm("Create the store with this layout?"))) {
+    out(yellow("Cancelled. Nothing was changed."));
+    return 1;
   }
 
-  await ensureStore(config);
-  await writeConfig(config.configPath, manifest);
-  const seeded = await seedFromAccount(config.storePath, source.dir, chosenItems);
-  success(`\nInitialized store. Seeded: ${seeded.join(", ") || "(nothing)"}`);
-  out("Next: ctx link --all   (symlink accounts into the store)");
+  await ensureDir(store);
+  await saveConfig(store, config);
+  await seedSlice(seed, store, config);
+  const slice = await readSlice(store);
+
+  out();
+  out(green(`Created ${tilde(store)}`));
+  out(`  ${pad("config", 10)} ${dim(tilde(join(store, CONFIG_FILE)))}`);
+  out(`  ${pad("registry", 10)} ${dim(describe(slice.data))}`);
+  out();
+  out(bold("Next"));
+  out(`  ctx sync --all    ${dim("fold every profile into the store")}`);
+  out(`  ctx status        ${dim("check the result")}`);
+  return 0;
 }

@@ -1,116 +1,139 @@
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import type { Account, PlannedAction, SharedItem } from "../types.js";
-import type { ResolvedConfig } from "../config/manifest.js";
-import { classifyEntry, classifyStore } from "./state.js";
-import { hashFile } from "../fs/ops.js";
+import type { EntryState, Plan, Profile, Step, StepKind } from "../types.js";
+import { exists, samePath } from "../util/fsx.js";
+import type { Config } from "./config.js";
+import { isGuarded, itemByName } from "./inventory.js";
 
-/** Build the intended link actions for an account across the given items. */
-export async function planLink(
-  config: ResolvedConfig,
-  account: Account,
-  items: SharedItem[]
-): Promise<PlannedAction[]> {
-  const out: PlannedAction[] = [];
-  for (const item of items) {
-    const accountPath = join(account.dir, item.name);
-    const storePath = join(config.storePath, item.name);
-    const entryState = await classifyEntry(accountPath, storePath);
-    const storeState = await classifyStore(storePath);
-    const base = { account: account.name, item, accountPath, storePath, entryState, storeState };
-
-    switch (entryState) {
-      case "LINKED":
-        out.push({ ...base, action: "noop", detail: "already linked" });
-        break;
-      case "BROKEN":
-      case "WRONG_TARGET":
-        if (storeState === "STORE_PRESENT") {
-          out.push({ ...base, action: "repair", detail: "fix symlink to point at store" });
-        } else {
-          out.push({
-            ...base,
-            action: "skip",
-            detail: `${entryState.toLowerCase()} symlink and store empty; run init first`,
-          });
-        }
-        break;
-      case "ABSENT":
-        if (storeState === "STORE_PRESENT") {
-          out.push({ ...base, action: "adopt", detail: "symlink to store" });
-        } else {
-          out.push({ ...base, action: "skip", detail: "not present" });
-        }
-        break;
-      case "REAL_DIR":
-        if (storeState === "STORE_PRESENT") {
-          out.push({ ...base, action: "merge", detail: "merge into store, then symlink" });
-        } else {
-          out.push({ ...base, action: "seed", detail: "move into store, then symlink" });
-        }
-        break;
-      case "REAL_FILE":
-        if (storeState === "STORE_PRESENT") {
-          const diverged = await filesDiffer(accountPath, storePath);
-          out.push({
-            ...base,
-            action: "relink",
-            diverged,
-            detail: diverged
-              ? "differs from store; store wins (account copy backed up)"
-              : "back up and symlink to store",
-          });
-        } else {
-          out.push({ ...base, action: "seed", detail: "move into store, then symlink" });
-        }
-        break;
-    }
-  }
-  return out;
-}
-
-/** Build the intended unlink actions (dereference symlinks back to real copies). */
-export async function planUnlink(
-  config: ResolvedConfig,
-  account: Account,
-  items: SharedItem[]
-): Promise<PlannedAction[]> {
-  const out: PlannedAction[] = [];
-  for (const item of items) {
-    const accountPath = join(account.dir, item.name);
-    const storePath = join(config.storePath, item.name);
-    const entryState = await classifyEntry(accountPath, storePath);
-    const storeState = await classifyStore(storePath);
-    const base = { account: account.name, item, accountPath, storePath, entryState, storeState };
-
-    switch (entryState) {
-      case "LINKED":
-        out.push({ ...base, action: "unlink", detail: "replace symlink with a real copy" });
-        break;
-      case "REAL_DIR":
-      case "REAL_FILE":
-        out.push({ ...base, action: "noop", detail: "already independent" });
-        break;
-      case "WRONG_TARGET":
-      case "BROKEN":
-        out.push({ ...base, action: "skip", detail: "not linked to store; run repair" });
-        break;
-      case "ABSENT":
-        out.push({ ...base, action: "skip", detail: "not present" });
-        break;
-    }
-  }
-  return out;
-}
-
-/** Actions that actually change the filesystem. */
-export function isMutating(a: PlannedAction): boolean {
-  return a.action !== "noop" && a.action !== "skip";
-}
-
-async function filesDiffer(a: string, b: string): Promise<boolean> {
+export async function stateOf(path: string, storeSlot: string): Promise<EntryState> {
+  let st;
   try {
-    return (await hashFile(a)) !== (await hashFile(b));
+    st = await lstat(path);
   } catch {
-    return true;
+    return "absent";
   }
+  if (st.isSymbolicLink()) {
+    if (!(await exists(await resolved(path)))) return "dangling";
+    return (await samePath(path, storeSlot)) ? "linked" : "misdirected";
+  }
+  return st.isDirectory() ? "dir" : "file";
+}
+
+async function resolved(path: string): Promise<string> {
+  const { readlink } = await import("node:fs/promises");
+  const target = await readlink(path);
+  return target.startsWith("/") ? target : join(path, "..", target);
+}
+
+/**
+ * What `ctx sync` would do to bring one profile in line with the store.
+ *
+ * `pending` lets a caller plan several profiles in one pass: once the first
+ * profile seeds `projects`, the second one absorbs into it rather than trying
+ * to seed it a second time.
+ */
+export async function planSync(
+  profile: Profile,
+  store: string,
+  config: Config,
+  only?: string[],
+  pending?: Set<string>,
+): Promise<Plan> {
+  const names = only ?? config.shared;
+  const steps: Step[] = [];
+
+  for (const name of names) {
+    const item = itemByName(name);
+    if (item === undefined || isGuarded(name) || item.role !== "shared") continue;
+
+    const from = join(profile.dir, name);
+    const to = join(store, name);
+    const state = await stateOf(from, to);
+    const storeHas = (await exists(to)) || pending?.has(name) === true;
+    if (state !== "absent") pending?.add(name);
+
+    steps.push({
+      profile: profile.name,
+      item,
+      from,
+      to,
+      state,
+      storeHas,
+      ...classify(state, storeHas),
+    });
+  }
+
+  return { steps, effective: steps.filter((s) => s.kind !== "keep") };
+}
+
+function classify(
+  state: EntryState,
+  storeHas: boolean,
+): { kind: StepKind; detail?: string } {
+  switch (state) {
+    case "linked":
+      return { kind: "keep" };
+    case "misdirected":
+      return { kind: "relink", detail: "points outside the store" };
+    case "dangling":
+      return { kind: "relink", detail: "target is gone" };
+    case "absent":
+      return storeHas ? { kind: "attach" } : { kind: "keep", detail: "nothing on either side" };
+    case "dir":
+      return storeHas
+        ? { kind: "absorb", detail: "merge into the store, store copy wins on collisions" }
+        : { kind: "seed", detail: "becomes the store's copy" };
+    case "file":
+      return storeHas
+        ? { kind: "stash", detail: "store copy wins, yours is backed up" }
+        : { kind: "seed", detail: "becomes the store's copy" };
+  }
+}
+
+/** What `ctx detach` would do: turn links back into independent real copies. */
+export async function planDetach(
+  profile: Profile,
+  store: string,
+  config: Config,
+  only?: string[],
+): Promise<Plan> {
+  const names = only ?? config.shared;
+  const steps: Step[] = [];
+
+  for (const name of names) {
+    const item = itemByName(name);
+    if (item === undefined || isGuarded(name)) continue;
+
+    const from = join(profile.dir, name);
+    const to = join(store, name);
+    const state = await stateOf(from, to);
+    const storeHas = await exists(to);
+    const detachable = state === "linked" || state === "misdirected" || state === "dangling";
+
+    steps.push({
+      profile: profile.name,
+      item,
+      from,
+      to,
+      state,
+      storeHas,
+      kind: detachable && storeHas ? "detach" : "keep",
+      detail: detachable && !storeHas ? "store has no copy to hand back" : undefined,
+    });
+  }
+
+  return { steps, effective: steps.filter((s) => s.kind !== "keep") };
+}
+
+/** What `ctx doctor` would fix: only links that are broken or point elsewhere. */
+export async function planRepair(
+  profile: Profile,
+  store: string,
+  config: Config,
+): Promise<Plan> {
+  const full = await planSync(profile, store, config);
+  const steps = full.steps.map((s) =>
+    s.kind === "relink" ? s : ({ ...s, kind: "keep", detail: undefined } satisfies Step),
+  );
+  return { steps, effective: steps.filter((s) => s.kind !== "keep") };
 }

@@ -1,51 +1,64 @@
-/** Shared item that can live in the store and be symlinked into an account. */
-export interface SharedItem {
-  name: string; // e.g. "projects" or "settings.json"
+/** How a top-level entry in a profile directory is treated. */
+export type Role =
+  /** Canonical copy lives in the store; the profile gets a symlink. */
+  | "shared"
+  /** Identity or account-scoped state. Never moved, never linked. */
+  | "identity"
+  /** Machine-local scratch. Left where it is, not shared, not guarded. */
+  | "local";
+
+export interface Item {
+  name: string;
   kind: "dir" | "file";
+  role: Role;
+  /** Shown in `ctx status --explain` and in the init picker. */
+  note?: string;
 }
 
-/** A Claude CLI account: a config directory plus a name. */
-export interface Account {
-  name: string; // "default", "ekram", ...
-  dir: string; // absolute path to the account config dir
-  isDefault: boolean; // ~/.claude, whose identity file is $HOME/.claude.json
+/** A Claude config directory: `~/.claude` or `~/.claude-<name>`. */
+export interface Profile {
+  /** "default" for ~/.claude, otherwise the suffix: "me", "ekram", ... */
+  name: string;
+  dir: string;
+  /**
+   * Where Claude keeps this profile's .claude.json. The default profile is the
+   * odd one out: it uses ~/.claude.json, not ~/.claude/.claude.json.
+   */
+  registryPath: string;
+  isDefault: boolean;
 }
 
-/**
- * State of an account's entry for a shared item, from an lstat that never
- * follows the final symlink. LINKED means "already points at the store".
- */
+/** lstat result for one profile entry, never following the final link. */
 export type EntryState =
-  | "ABSENT"
-  | "REAL_FILE"
-  | "REAL_DIR"
-  | "LINKED"
-  | "WRONG_TARGET"
-  | "BROKEN";
+  | "absent"
+  | "file"
+  | "dir"
+  | "linked" // symlink already resolving to the store slot
+  | "misdirected" // symlink pointing somewhere else
+  | "dangling"; // symlink whose target does not exist
 
-export type StoreState = "STORE_PRESENT" | "STORE_ABSENT";
+export type StepKind =
+  | "seed" // move the profile's copy into an empty store slot, then link
+  | "absorb" // merge the profile's dir into an existing store dir, then link
+  | "stash" // park a conflicting file in backups, then link
+  | "attach" // store has it, profile does not: just link
+  | "relink" // fix a misdirected or dangling link
+  | "detach" // replace a link with a real copy of the store content
+  | "keep"; // already correct, or nothing on either side
 
-/** What a link/unlink run intends to do for one (account, item) pair. */
-export type ActionKind =
-  | "noop" // already in desired state
-  | "skip" // nothing to share (absent on both sides)
-  | "seed" // move real entry into an empty store slot, then symlink
-  | "merge" // merge real dir into store, back up, then symlink
-  | "adopt" // store present, account absent -> just symlink
-  | "relink" // file: back up account copy, then symlink to store
-  | "repair" // fix a wrong/broken symlink
-  | "unlink"; // replace symlink with a real dereferenced copy
-
-export interface PlannedAction {
-  account: string;
-  item: SharedItem;
-  accountPath: string;
-  storePath: string;
-  entryState: EntryState;
-  storeState: StoreState;
-  action: ActionKind;
-  /** Set when a file's content differs from the store copy (store-wins). */
-  diverged?: boolean;
-  /** Human-readable note for dry-run / confirm output. */
+export interface Step {
+  profile: string;
+  item: Item;
+  from: string; // path inside the profile
+  to: string; // path inside the store
+  state: EntryState;
+  storeHas: boolean;
+  kind: StepKind;
   detail?: string;
+}
+
+export interface Plan {
+  steps: Step[];
+  /** Steps that change something on disk, in the order they will run. */
+  effective: Step[];
 }

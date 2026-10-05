@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { add } from "./commands/add.js";
 import { doctor } from "./commands/doctor.js";
 import { hookEnd, hooks } from "./commands/hooks.js";
 import { init } from "./commands/init.js";
@@ -9,12 +11,14 @@ import { detach, sync } from "./commands/sync.js";
 import { parseArgs, type Parsed } from "./util/args.js";
 import { bold, CtxError, dim, err, out, red, silenceBrokenPipe } from "./util/ui.js";
 
-const VERSION = "1.0.0";
+const VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string })
+  .version;
 
 type Handler = (args: Parsed) => Promise<number>;
 
 const COMMANDS: Record<string, Handler> = {
   init,
+  add,
   status,
   sync,
   detach,
@@ -38,7 +42,8 @@ function usage(): void {
   out(`${bold("ctx")} ${dim(VERSION)}  one source of truth for every Claude account on this machine`);
   out();
   out(bold("Commands"));
-  out(`  init                        create the store and choose what it owns`);
+  out(`  init [--from P] [--add D,..] create the store and choose what it owns`);
+  out(`  add <dir>... [--as name]    manage a profile dir outside ~/.claude-*, or rename one`);
   out(`  sync [profile...] [--all]   move a profile's data into the store and symlink it back`);
   out(`  status                      what every profile shares, and what it does not`);
   out(`  run <profile> [-- args]     launch claude for a profile with the shared registry`);
@@ -57,6 +62,7 @@ function usage(): void {
   out(`      --json      machine-readable output`);
   out(`      --only a,b  restrict to these items`);
   out(`      --store P   use a different store (default ~/.ctx-store)`);
+  out(`      --force     sync or detach even while claude is running there`);
   out();
   out(dim("  Identity is never shared. .credentials.json, entitlements and oauthAccount"));
   out(dim("  stay with the profile that owns them."));

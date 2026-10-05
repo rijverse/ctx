@@ -6,7 +6,7 @@ export interface Parsed {
   passthrough: string[];
 }
 
-const TAKES_VALUE = new Set(["config", "store", "profile", "from", "only"]);
+const TAKES_VALUE = new Set(["config", "store", "profile", "from", "only", "add", "as"]);
 
 export function parseArgs(argv: string[]): Parsed {
   const positionals: string[] = [];

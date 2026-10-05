@@ -4,7 +4,7 @@ import { resolveProfile } from "../core/profiles.js";
 import { describe, extract, type Registry } from "../core/registry.js";
 import { pull, push, readSlice } from "../core/session.js";
 import type { Parsed } from "../util/args.js";
-import { bold, cyan, dim, fail, green, out, pad } from "../util/ui.js";
+import { bold, cyan, dim, fail, green, out, pad, yellow } from "../util/ui.js";
 import { context } from "./_context.js";
 
 /**
@@ -47,7 +47,8 @@ export async function registry(args: Parsed): Promise<number> {
       return 0;
     }
     const n = await pull(profile, ctx.store, ctx.config);
-    out(`${green("pulled")} ${n} key(s) into ${cyan(tilde(profile.registryPath))}`);
+    if (n.reset) out(yellow(`${tilde(profile.registryPath)} looked reset, so it was restored from the store.`));
+    out(`${green("pulled")} ${n.keys} key(s) into ${cyan(tilde(profile.registryPath))}`);
     return 0;
   }
 
@@ -59,7 +60,11 @@ export async function registry(args: Parsed): Promise<number> {
       return 0;
     }
     const n = await push(profile, ctx.store, ctx.config);
-    out(`${green("pushed")} ${n} key(s) from ${cyan(profile.name)} into the store`);
+    if (n.reset) {
+      out(yellow(`${tilde(profile.registryPath)} looks reset, so it was not pushed. \`ctx registry pull ${profile.name}\` restores it.`));
+      return 1;
+    }
+    out(`${green("pushed")} ${cyan(profile.name)} into the store, which holds ${n.keys} shared key(s)`);
     return 0;
   }
 

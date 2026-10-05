@@ -4,7 +4,8 @@ import { loadConfig } from "../core/config.js";
 import { INVENTORY, itemByName } from "../core/inventory.js";
 import { stateOf } from "../core/plan.js";
 import { tilde } from "../core/paths.js";
-import { listProfiles } from "../core/profiles.js";
+import { liveSessions } from "../core/live.js";
+import { candidates, listProfiles } from "../core/profiles.js";
 import { describe } from "../core/registry.js";
 import { readSlice } from "../core/session.js";
 import type { Parsed } from "../util/args.js";
@@ -27,15 +28,16 @@ export async function status(args: Parsed): Promise<number> {
   }
 
   const profiles = await listProfiles(config, g.store);
-  const rows: { profile: Profile; states: Map<string, EntryState> }[] = [];
+  const rows: { profile: Profile; states: Map<string, EntryState>; running: number[] }[] = [];
 
   for (const profile of profiles) {
     const states = new Map<string, EntryState>();
     for (const name of config.shared) {
       states.set(name, await stateOf(join(profile.dir, name), join(g.store, name)));
     }
-    rows.push({ profile, states });
+    rows.push({ profile, states, running: await liveSessions(profile) });
   }
+  const found = await candidates(profiles, g.store);
 
   if (g.json) {
     out(
@@ -49,8 +51,10 @@ export async function status(args: Parsed): Promise<number> {
             name: r.profile.name,
             dir: r.profile.dir,
             registry: r.profile.registryPath,
+            running: r.running,
             items: Object.fromEntries(r.states),
           })),
+          unmanaged: found,
         },
         null,
         2,
@@ -86,9 +90,16 @@ export async function status(args: Parsed): Promise<number> {
     out(dim(`  ${unmanaged.join("  ")}`));
   }
 
+  if (found.length > 0) {
+    out();
+    out(`${bold("Claude dirs not managed")} ${dim("(`ctx add <dir>` takes one in)")}`);
+    for (const c of found) out(`  ${pad(c.name, nameWidth)} ${dim(tilde(c.dir))}  ${dim(c.why)}`);
+  }
+
   out();
-  for (const profile of profiles) {
-    out(`  ${pad(profile.name, nameWidth)} ${dim(tilde(profile.dir))}`);
+  for (const { profile, running } of rows) {
+    const live = running.length > 0 ? `  ${yellow(`claude running (${running.length})`)}` : "";
+    out(`  ${pad(profile.name, nameWidth)} ${dim(tilde(profile.dir))}${live}`);
   }
   out();
   return 0;

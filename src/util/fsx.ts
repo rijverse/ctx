@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import {
   access,
+  chmod,
   cp,
   lstat,
   mkdir,
@@ -10,10 +11,13 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { CtxError } from "./ui.js";
 
 export async function exists(p: string): Promise<boolean> {
   try {
@@ -55,23 +59,61 @@ export async function ensureDir(p: string): Promise<void> {
   await mkdir(p, { recursive: true });
 }
 
-/** Write via a sibling temp file so a crash cannot leave a half-written file. */
-export async function writeAtomic(p: string, data: string, mode = 0o644): Promise<void> {
-  await ensureDir(dirname(p));
-  const tmp = `${p}.ctx-tmp-${process.pid}-${Date.now().toString(36)}`;
-  await writeFile(tmp, data, { mode });
-  await rename(tmp, p);
-}
-
-export async function readJson<T>(p: string): Promise<T | undefined> {
+/**
+ * Write via a sibling temp file so a crash cannot leave a half-written file.
+ * A symlink is written through rather than replaced. An existing file keeps its
+ * mode, and a `mode` passed in is a ceiling as well as the mode for a new file,
+ * so a file holding secrets is never left more open than asked.
+ */
+export async function writeAtomic(p: string, data: string, mode?: number): Promise<void> {
+  const target = await followLink(p);
+  await ensureDir(dirname(target));
+  let keep = mode ?? 0o644;
   try {
-    return JSON.parse(await readFile(p, "utf8")) as T;
+    const existing = (await stat(target)).mode & 0o777;
+    keep = mode === undefined ? existing : existing & mode;
   } catch {
-    return undefined;
+    /* new file */
+  }
+  const tmp = `${target}.ctx-tmp-${process.pid}-${Date.now().toString(36)}`;
+  try {
+    await writeFile(tmp, data, { mode: keep });
+    // writeFile's mode goes through the umask. This one is meant exactly.
+    await chmod(tmp, keep);
+    await rename(tmp, target);
+  } catch (e) {
+    await rm(tmp, { force: true });
+    throw e;
   }
 }
 
-export async function writeJson(p: string, value: unknown, mode = 0o644): Promise<void> {
+async function followLink(p: string): Promise<string> {
+  const target = await linkTarget(p);
+  if (target === undefined) return p;
+  return isAbsolute(target) ? target : resolve(dirname(p), target);
+}
+
+/**
+ * Undefined only when the file does not exist. A file that is there but does
+ * not parse is an error, never "empty": treating it as empty is how a caller
+ * ends up writing a fresh file over the one it could not read.
+ */
+export async function readJson<T>(p: string): Promise<T | undefined> {
+  let text: string;
+  try {
+    text = await readFile(p, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw e;
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch (e) {
+    throw new CtxError(`${p} is not valid JSON (${(e as Error).message}), so it was left untouched`);
+  }
+}
+
+export async function writeJson(p: string, value: unknown, mode?: number): Promise<void> {
   await writeAtomic(p, JSON.stringify(value, null, 2) + "\n", mode);
 }
 
@@ -94,11 +136,44 @@ export async function copyInto(from: string, to: string): Promise<void> {
   await cp(from, to, { recursive: true, dereference: true, force: true });
 }
 
+/**
+ * Point `at` at `target`. An existing link is swapped with a rename, so there
+ * is no moment where the path is missing and a running claude could create a
+ * real directory in its place. Anything at `at` that is not a link is refused.
+ */
 export async function replaceSymlink(at: string, target: string): Promise<void> {
   await ensureDir(dirname(at));
-  const st = await linkTarget(at);
-  if (st !== undefined) await rm(at, { force: true });
-  await symlink(target, at);
+  if ((await linkTarget(at)) === undefined) {
+    try {
+      await symlink(target, at);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      throw new CtxError(`${at} appeared while it was being linked, so it was left as it is. Is claude running there?`);
+    }
+    return;
+  }
+  const tmp = `${at}.ctx-link-${process.pid}`;
+  await rm(tmp, { force: true });
+  await symlink(target, tmp);
+  await rename(tmp, at);
+}
+
+/** Remove the directories under `dir` that hold no files. Never removes a file. */
+export async function removeEmptyDirs(dir: string): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (e.isDirectory()) await removeEmptyDirs(join(dir, e.name));
+  }
+  try {
+    await rmdir(dir);
+  } catch {
+    /* not empty, which is the point */
+  }
 }
 
 /**

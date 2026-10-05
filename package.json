@@ -2,6 +2,13 @@
   "name": "@rijverse/ctx",
   "version": "1.0.0",
   "description": "One source of truth for every Claude Code account on a machine: shared context, separate logins.",
+  "author": "Rijoanul Hasan <rijoanul.shanto@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rijverse/ctx.git"
+  },
+  "homepage": "https://github.com/rijverse/ctx#readme",
+  "bugs": "https://github.com/rijverse/ctx/issues",
   "type": "module",
   "bin": {
     "ctx": "./dist/cli.js"
@@ -9,16 +16,19 @@
   "main": "./dist/cli.js",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/cli.js",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc && chmod +x dist/cli.js",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
     "start": "node dist/cli.js",
-    "pretest": "npm run build"
+    "pretest": "npm run build",
+    "prepublishOnly": "npm test"
   },
   "engines": {
     "node": ">=20"

@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
+import { constants } from "node:os";
 import { planSync } from "../core/plan.js";
 import { tilde } from "../core/paths.js";
 import { resolveProfile } from "../core/profiles.js";
 import { pull, push } from "../core/session.js";
 import type { Parsed } from "../util/args.js";
 import { ensureDir } from "../util/fsx.js";
-import { cyan, dim, fail, out, yellow } from "../util/ui.js";
+import { CtxError, cyan, dim, fail, out, yellow } from "../util/ui.js";
 import { context } from "./_context.js";
 
 /**
@@ -34,16 +35,27 @@ export async function runProfile(args: Parsed): Promise<number> {
     );
   }
 
-  const pulled = await pull(profile, ctx.store, ctx.config);
-  if (ctx.verbose) {
-    out(dim(`ctx: ${pulled} shared key(s) into ${tilde(profile.registryPath)}`));
-    out(dim(`ctx: CLAUDE_CONFIG_DIR=${tilde(profile.dir)}`));
+  // A .claude.json ctx cannot read is Claude's to recover, so the session
+  // still starts, just without the shared keys this time.
+  try {
+    const pulled = await pull(profile, ctx.store, ctx.config);
+    if (pulled.reset) out(yellow(`ctx: ${tilde(profile.registryPath)} looked reset, so it was restored from the store.`));
+    if (ctx.verbose) out(dim(`ctx: ${pulled.keys} shared key(s) into ${tilde(profile.registryPath)}`));
+  } catch (e) {
+    if (!(e instanceof CtxError)) throw e;
+    out(yellow(`ctx: skipped the registry pull: ${e.message}`));
   }
+  if (ctx.verbose) out(dim(`ctx: CLAUDE_CONFIG_DIR=${tilde(profile.dir)}`));
 
   const code = await launch(profile.dir, args.passthrough);
 
-  const merged = await push(profile, ctx.store, ctx.config);
-  if (ctx.verbose) out(dim(`ctx: merged ${merged} key(s) back into the store`));
+  try {
+    const merged = await push(profile, ctx.store, ctx.config);
+    if (ctx.verbose) out(dim(`ctx: folded the session back, store holds ${merged.keys} shared key(s)`));
+  } catch (e) {
+    if (!(e instanceof CtxError)) throw e;
+    out(yellow(`ctx: could not fold the session back: ${e.message}`));
+  }
 
   return code;
 }
@@ -64,16 +76,20 @@ function launch(configDir: string, argv: string[]): Promise<number> {
       out(yellow(`could not launch claude: ${e.message}`));
       resolve(1);
     });
-    // Let claude own the terminal: forward signals rather than dying first.
-    const forward = (sig: NodeJS.Signals) => () => child.kill(sig);
-    const onInt = forward("SIGINT");
-    const onTerm = forward("SIGTERM");
-    process.on("SIGINT", onInt);
+    // The terminal already sends SIGINT and SIGHUP to claude, which shares our
+    // process group, so forwarding them would deliver each one twice. They are
+    // only caught so ctx outlives claude and can fold the session back.
+    // SIGTERM is usually aimed at ctx alone, so that one is passed on.
+    const stay = () => {};
+    const onTerm = () => child.kill("SIGTERM");
+    process.on("SIGINT", stay);
+    process.on("SIGHUP", stay);
     process.on("SIGTERM", onTerm);
     child.on("close", (code, signal) => {
-      process.off("SIGINT", onInt);
+      process.off("SIGINT", stay);
+      process.off("SIGHUP", stay);
       process.off("SIGTERM", onTerm);
-      resolve(signal !== null ? 128 : (code ?? 0));
+      resolve(signal !== null ? 128 + (constants.signals[signal] ?? 0) : (code ?? 0));
     });
   });
 }

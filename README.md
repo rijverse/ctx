@@ -67,6 +67,42 @@ ctx run me          # launch claude as ~/.claude-me, shared data
 Nothing is written until you confirm. `--dry-run` prints the plan and stops,
 `-y` skips the prompt.
 
+### The seed
+
+The store starts from one profile, the seed, and `sync` always does that one
+first. Its `settings.json`, `CLAUDE.md`, skills and plugins become everyone's,
+and when another profile has a file of the same name, the store's copy wins and
+the other one goes to that profile's backup. The seed is `~/.claude` unless you
+say otherwise with `ctx init --from <profile>`, and is recorded in `ctx.json`.
+With no `~/.claude` and more than one profile, `init` asks rather than guesses.
+A `sync` that would let another profile get in ahead of the seed is refused
+until the seed is synced.
+
+### Profiles with other names
+
+`CLAUDE_CONFIG_DIR` can point anywhere. `~/.claude` and `~/.claude-*` are found
+on their own. A config dir under any other name, `~/.my-claude` say, is spotted
+when `CLAUDE_CONFIG_DIR` points at it in your shell or a shell startup file
+(`.zshrc`, `.bashrc`, an alias, fish's `config.fish`), or when a directory in
+`~` holds a `.claude.json` or `.credentials.json`. Those are only suggested:
+`init` asks about each one, `status` lists them, and `ctx run my-claude` tells
+you to add it instead of making a new profile. A backup copy of a profile looks
+exactly like a profile, so nothing is taken in without a yes. Adding by path:
+
+```sh
+ctx init --add ~/work/.claude,~/accounts/alpha    # before there is a store
+ctx add ~/clients/acme/.claude                   # after
+ctx add ~/clients/acme/.claude --as acme-client  # pick the name yourself
+```
+
+`~/.claude-work` is called `work`, a `.claude` directory is named after its
+parent (`~/work/.claude` is `work`), and any other directory goes by its own
+name. Two profiles can never share a name, because backups and merge history
+are kept by it. When two would, ctx stops and asks for `--as`.
+
+`rollout.sh` in this repo walks a machine through all of this with a backup
+first: `./rollout.sh [--add DIR,DIR] [--seed PROFILE] [trial-profile]`.
+
 ## What is shared, and what is never shared
 
 Shared, moved into the store once and symlinked back:
@@ -108,9 +144,27 @@ file untouched:
 | `tipsHistory`, `skillUsage`, `pluginUsage`, `githubRepoPaths` | startup counters, migration flags |
 | `hasCompletedOnboarding`, `promptQueueUseCount` | everything else, including keys added by future releases |
 
-`ctx run <profile>` writes the shared keys in before launching and merges what
-the session changed back out afterwards. `projects` merges per path and per
-field, so two accounts working on different repos never erase each other.
+`ctx run <profile>` folds the profile into the store and writes the shared keys
+back in before launching, then folds what the session changed back out
+afterwards. Folding is a three-way merge against what that profile and the store
+last agreed on, kept in `<store>/.bases/`:
+
+- A change on one side wins over a side that did not touch it, deletions
+  included. Remove an MCP server in one account and it is gone from all of them.
+- Objects merge entry by entry, so two accounts working on different repos
+  never erase each other.
+- When both sides changed the same value, lists such as `allowedTools` merge as
+  sets, a flag either side set (like a trust decision) stays set, an edit beats
+  a deletion, and otherwise the profile wins as the latest writer.
+- A profile whose project registry suddenly went empty looks reset, not
+  curated. It is restored from the store instead of being merged into it, so
+  one wiped `.claude.json` cannot wipe every account.
+- A `.claude.json` that does not parse is never read as empty. `ctx` leaves it
+  untouched and says so, and `ctx run` still launches `claude` so it can
+  recover the file itself.
+
+Writes to `.claude.json` take the same `<file>.lock` Claude takes when it saves
+the file, so a pull never lands in the middle of a running session's save.
 
 The practical effect: trust a repo once, and every account trusts it. Add an MCP
 server once, and every account has it. Log in once per account, and that login
@@ -125,7 +179,8 @@ ctx registry push me        # profile -> store
 
 If you start `claude` some other way, `ctx hooks install` adds a `SessionEnd`
 hook to the shared `settings.json` so the session still folds its changes back
-into the store on exit. Only the push half is hookable: `SessionStart` fires
+into the store on exit. A non-default `--store` is written into the hook, and
+installing again after moving `ctx` updates the path in place. Only the push half is hookable: `SessionStart` fires
 after Claude has already read `.claude.json`, so pulling there would be
 overwritten by Claude's own next save. Pulling stays the job of `ctx run`.
 
@@ -133,26 +188,36 @@ overwritten by Claude's own next save. Pulling stays the job of `ctx run`.
 
 | Command | What it does |
 |---|---|
-| `ctx init [--from <profile>]` | Create the store and seed it. |
-| `ctx sync [profile...] [--all]` | Move a profile's data into the store and symlink it back. |
+| `ctx init [--from <profile>] [--add <dir>,...] [--as <name>]` | Create the store and pick its seed. |
+| `ctx add <dir>... [--as <name>]` | Manage a profile outside `~/.claude-*`, or rename one. |
+| `ctx sync [profile...] [--all] [--force]` | Move a profile's data into the store and symlink it back. |
 | `ctx status` (alias `ls`) | Per-profile, per-item state in one grid. |
 | `ctx run <profile> [-- <args>]` | Launch `claude` with the shared registry in place. |
-| `ctx detach [profile...]` | Give a profile back its own independent copies. |
-| `ctx doctor [profile...]` | Find and repair broken or misdirected links. |
+| `ctx detach [profile...] [--force]` | Give a profile back its own independent copies. |
+| `ctx doctor [profile...]` | Find and repair broken or misdirected links, and flag real copies where a link should be. |
 | `ctx registry <show\|pull\|push\|diff>` | Drive the `.claude.json` split by hand. |
 | `ctx hooks <status\|install\|uninstall>` | Wire sessions you did not start with `ctx run` into the store. |
 | `ctx which [profile]` | Print the `CLAUDE_CONFIG_DIR` export for a profile. |
 
 Flags: `-n/--dry-run`, `-y/--yes`, `-v/--verbose`, `--json`, `--only a,b`,
-`--store <path>`.
+`--store <path>`, `--force`.
 
 ## Safety
 
 The tool is built so an interrupted run is always safe to re-run.
 
 - Real data is moved, never deleted. It goes into the store, or into
-  `<store>/.backups/<profile>/<timestamp>/`. The only thing `ctx` deletes
-  outright is a symlink it is about to replace.
+  `<store>/.backups/<profile>/<timestamp>/`. The only things `ctx` deletes
+  outright are a symlink it is about to replace and directories with no files
+  left in them. A file that turns up mid-merge goes to the backup.
+- `sync` and `detach` refuse a profile while `claude` is running in it, going by
+  the `sessions/<pid>.json` files Claude keeps. Close those sessions, or pass
+  `--force` if you know better. Session files left by a crashed `claude` are
+  ignored.
+- Links are swapped with a rename, so a path is never briefly missing for a
+  running session to recreate as a real directory.
+- Everything that changes the store runs under one lock, so two `ctx`
+  processes, or two sessions ending at once, take turns.
 - Every step runs in the order merge, back up, then link, so the store is a
   superset before a profile's copy goes away.
 - Directories are merged without clobbering. When the same path exists on both
@@ -165,16 +230,18 @@ The tool is built so an interrupted run is always safe to re-run.
 
 ## Caveats
 
-- Linux. Symlink behavior on macOS should work the same way but is untested;
-  Windows is out of scope.
+- Linux. Symlink behavior on macOS should work the same way but is untested.
+  Without `/proc`, a session or lock holder is recognised by pid alone, not pid
+  and start time. Windows is out of scope.
 - Two sessions writing the shared `projects/` at once is fine, since transcripts
-  are separate files with unique ids. Prefer to close running sessions before
-  `sync` or `detach`, because the move step could race a live writer.
+  are separate files with unique ids.
 - `history.jsonl` is a single append-only file, so two sessions writing it at
   once can interleave. Drop it from `shared` in `ctx.json` if that bothers you.
-- The `.claude.json` merge is last-writer-wins per key, per project. Two
-  sessions that end at the same moment are serialised by a lock, but the later
-  one still wins on any field they both touched.
+- Removing every MCP server, or every project, from one account reads as a
+  reset and does not spread. Remove them one at a time, or edit
+  `<store>/registry.json`, if that is really what you want.
+- A session started without `ctx run` only gets the shared keys the next time
+  that profile is pulled. The hook covers the push half only.
 - `plugins/` caches marketplace checkouts. Sharing it is usually what you want
   and is in the defaults, but it is the item most likely to surprise you.
 
@@ -188,13 +255,19 @@ The tool is built so an interrupted run is always safe to re-run.
   "shared": ["projects", "todos", "skills", "settings.json"],
   "registryKeys": ["projects", "mcpServers"],
   "backup": true,
-  "profiles": []
+  "profiles": ["/home/me/work/.claude", { "dir": "/home/me/acme", "name": "acme-client" }],
+  "seed": "default"
 }
 ```
 
 Unknown or guarded names in `shared` are dropped on load rather than rejected,
-so a bad edit shares less instead of breaking the tool. An empty `profiles`
-means auto-discover every `~/.claude` and `~/.claude-*` directory.
+so a bad edit shares less instead of breaking the tool. `~/.claude` and every
+`~/.claude-*` directory that is empty or holds something only Claude writes
+there (`.claude.json`, `projects`, `settings.json` and so on) are discovered.
+Other tools that live in `~/.claude-*`, and old `ctx` stores, are skipped.
+`profiles` adds directories on top of those, by path or with a name, and is
+what `ctx add` writes. A store that sits inside a profile, or the other way
+round, is refused.
 
 ## Testing
 
@@ -202,5 +275,7 @@ means auto-discover every `~/.claude` and `~/.claude-*` directory.
 npm test
 ```
 
-Tests run against throwaway directories under `$TMPDIR` via `CTX_HOME`, and
-never read or write your real `~/.claude*`.
+Tests run against throwaway directories under `$TMPDIR` via `CTX_HOME`, with
+`HOME` also pointed at a throwaway directory and a fake `claude` first on
+`PATH`, so they never read or write your real `~/.claude*` or start the real
+`claude`.

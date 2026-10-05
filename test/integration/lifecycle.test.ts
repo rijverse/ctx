@@ -1,11 +1,11 @@
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { apply } from "../../src/core/apply.js";
 import { defaultConfig, type Config } from "../../src/core/config.js";
 import { profileFromDir } from "../../src/core/paths.js";
 import { planDetach, planSync } from "../../src/core/plan.js";
-import { pull, push, readSlice, seedSlice } from "../../src/core/session.js";
+import { pull, push, readSlice } from "../../src/core/session.js";
 import { fakeHome, type FakeHome } from "../helpers/fakeHome.js";
 
 let fh: FakeHome;
@@ -137,7 +137,7 @@ describe("the .claude.json split", () => {
     const first = profileFromDir(join(fh.home, ".claude"));
     const second = profileFromDir(join(fh.home, ".claude-me"));
 
-    await seedSlice(first, fh.store, config);
+    await push(first, fh.store, config);
     await pull(second, fh.store, config);
 
     const after = JSON.parse(await readFile(second.registryPath, "utf8"));
@@ -177,6 +177,114 @@ describe("the .claude.json split", () => {
 
     const slice = await readSlice(fh.store);
     expect(Object.keys(slice.data.projects as object).sort()).toEqual(["/a", "/b"]);
+  });
+
+  const me = () => profileFromDir(join(fh.home, ".claude-me"));
+  const readReg = async (path: string) => JSON.parse(await readFile(path, "utf8"));
+  const editReg = async (path: string, fn: (j: Record<string, any>) => void) => {
+    const j = await readReg(path);
+    fn(j);
+    await writeFile(path, JSON.stringify(j));
+  };
+
+  it("keeps what a profile changed before the pull instead of overwriting it", async () => {
+    const path = await fh.registry("me", { userID: "u", mcpServers: { foo: {} }, projects: { "/a": {} } });
+    await pull(me(), fh.store, config);
+
+    // A session started without ctx run adds a server and trusts a repo.
+    await editReg(path, (j) => {
+      j.mcpServers.bar = {};
+      j.projects["/b"] = { hasTrustDialogAccepted: true };
+    });
+    await pull(me(), fh.store, config);
+
+    const after = await readReg(path);
+    expect(Object.keys(after.mcpServers).sort()).toEqual(["bar", "foo"]);
+    expect(after.projects["/b"].hasTrustDialogAccepted).toBe(true);
+  });
+
+  it("makes a removal stick across push and pull, in every profile", async () => {
+    const mine = await fh.registry("me", { mcpServers: { foo: {}, bar: {} }, projects: { "/a": {} } });
+    const theirs = await fh.registry("ekram", { projects: { "/a": {} } });
+    const ekram = profileFromDir(join(fh.home, ".claude-ekram"));
+    await pull(me(), fh.store, config);
+    await pull(ekram, fh.store, config);
+    expect(Object.keys((await readReg(theirs)).mcpServers).sort()).toEqual(["bar", "foo"]);
+
+    await editReg(mine, (j) => delete j.mcpServers.foo);
+    await push(me(), fh.store, config);
+    await pull(me(), fh.store, config);
+    await pull(ekram, fh.store, config);
+
+    expect(Object.keys((await readReg(mine)).mcpServers)).toEqual(["bar"]);
+    expect(Object.keys((await readReg(theirs)).mcpServers)).toEqual(["bar"]);
+  });
+
+  it("refuses to touch a .claude.json it cannot parse", async () => {
+    await fh.registry("default", { projects: { "/a": {} } });
+    await push(profileFromDir(join(fh.home, ".claude")), fh.store, config);
+    const before = await readFile(join(fh.store, "registry.json"), "utf8");
+
+    const broken = '{"oauthAccount":{"emailAddress":"me@x"},"primaryApiKey":"sk-x",';
+    await mkdir(join(fh.home, ".claude-me"), { recursive: true });
+    await writeFile(me().registryPath, broken);
+
+    await expect(pull(me(), fh.store, config)).rejects.toThrow("not valid JSON");
+    await expect(push(me(), fh.store, config)).rejects.toThrow("not valid JSON");
+    expect(await readFile(me().registryPath, "utf8")).toBe(broken);
+    expect(await readFile(join(fh.store, "registry.json"), "utf8")).toBe(before);
+  });
+
+  it("restores a reset profile from the store instead of spreading the reset", async () => {
+    const path = await fh.registry("me", {
+      userID: "u",
+      hasCompletedOnboarding: true,
+      projects: { "/a": { hasTrustDialogAccepted: true } },
+      mcpServers: { foo: {} },
+    });
+    await pull(me(), fh.store, config);
+
+    // What a wiped .claude.json looks like once Claude has written its defaults.
+    await writeFile(path, JSON.stringify({ userID: "new", hasCompletedOnboarding: false, projects: {} }));
+    expect((await push(me(), fh.store, config)).reset).toBe(true);
+    expect((await readSlice(fh.store)).data.mcpServers).toEqual({ foo: {} });
+
+    const pulled = await pull(me(), fh.store, config);
+    expect(pulled.reset).toBe(true);
+    const after = await readReg(path);
+    expect(after.userID).toBe("new");
+    expect(after.hasCompletedOnboarding).toBe(true);
+    expect(after.projects["/a"].hasTrustDialogAccepted).toBe(true);
+    expect(after.mcpServers).toEqual({ foo: {} });
+  });
+
+  it("waits for Claude's own lock on .claude.json before writing it", async () => {
+    const path = await fh.registry("me", { userID: "u" });
+    await mkdir(`${path}.lock`);
+    let released = false;
+    setTimeout(() => {
+      released = true;
+      void rm(`${path}.lock`, { recursive: true });
+    }, 300);
+
+    await pull(me(), fh.store, config);
+    expect(released).toBe(true);
+  });
+
+  it("takes over a .claude.json lock that Claude abandoned", async () => {
+    const path = await fh.registry("me", { userID: "u" });
+    await mkdir(`${path}.lock`);
+    const old = new Date(Date.now() - 60_000);
+    await utimes(`${path}.lock`, old, old);
+
+    await pull(me(), fh.store, config);
+    await expect(lstat(`${path}.lock`)).rejects.toThrow();
+  });
+
+  it("keeps the store's copy of the registry private, like .claude.json", async () => {
+    await fh.registry("me", { mcpServers: { s: { env: { API_KEY: "k" } } } });
+    await push(me(), fh.store, config);
+    expect((await lstat(join(fh.store, "registry.json"))).mode & 0o777).toBe(0o600);
   });
 
   it("puts the default profile's registry at ~/.claude.json, not inside the dir", async () => {

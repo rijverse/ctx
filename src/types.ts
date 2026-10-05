@@ -13,6 +13,12 @@ export interface Item {
   role: Role;
   /** Shown in `ctx status --explain` and in the init picker. */
   note?: string;
+  /**
+   * Copies that can be combined rather than one winning. "lines" means JSONL
+   * merged in timestamp order: the file itself, or for a directory, the .jsonl
+   * files in it that both sides have.
+   */
+  merge?: "lines";
 }
 
 /** A Claude config directory: `~/.claude` or `~/.claude-<name>`. */

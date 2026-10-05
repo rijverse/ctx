@@ -1,8 +1,8 @@
-import { lstat, mkdir, mkdtemp, readFile, readlink, symlink, writeFile, chmod } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { readJson, removeEmptyDirs, replaceSymlink, writeJson } from "../../src/util/fsx.js";
+import { mergeLines, move, readJson, removeEmptyDirs, replaceSymlink, writeJson } from "../../src/util/fsx.js";
 
 const scratch = () => mkdtemp(join(tmpdir(), "ctx-fsx-"));
 
@@ -71,3 +71,51 @@ describe("removeEmptyDirs", () => {
     expect(await readFile(join(dir, "c", "late.jsonl"), "utf8")).toBe("written mid-merge");
   });
 });
+
+describe("mergeLines", () => {
+  const entry = (display: string, timestamp: number) => JSON.stringify({ display, timestamp });
+
+  it("interleaves two histories by time and drops exact duplicates", async () => {
+    const dir = await scratch();
+    const from = join(dir, "mine.jsonl");
+    const to = join(dir, "store.jsonl");
+    await writeFile(to, [entry("a", 1), entry("c", 3), entry("shared", 5)].join("\n") + "\n");
+    await writeFile(from, [entry("b", 2), entry("shared", 5), entry("d", 4)].join("\n") + "\n");
+
+    await mergeLines(from, to);
+
+    const lines = (await readFile(to, "utf8")).trim().split("\n").map((l) => JSON.parse(l).display);
+    expect(lines).toEqual(["a", "b", "c", "d", "shared"]);
+  });
+
+  it("keeps a line it cannot read next to the one before it", async () => {
+    const dir = await scratch();
+    const from = join(dir, "mine.jsonl");
+    const to = join(dir, "store.jsonl");
+    await writeFile(to, entry("a", 10) + "\n" + entry("c", 30) + "\n");
+    await writeFile(from, entry("b", 20) + "\nnot json\n");
+
+    await mergeLines(from, to);
+
+    expect((await readFile(to, "utf8")).trim().split("\n")).toEqual([entry("a", 10), entry("b", 20), "not json", entry("c", 30)]);
+  });
+});
+
+describe("move", () => {
+  it("keeps relative links pointing where they did when the depth changes", async () => {
+    const root = await scratch();
+    await mkdir(join(root, ".agents", "skills", "shadcn"), { recursive: true });
+    await mkdir(join(root, "work", ".claude", "skills", "own"), { recursive: true });
+    const skills = join(root, "work", ".claude", "skills");
+    await symlink("../../../.agents/skills/shadcn", join(skills, "shadcn"));
+    await symlink("own", join(skills, "inside"));
+
+    const store = join(root, ".ctx-store", "skills");
+    await move(skills, store);
+
+    expect(await readlink(join(store, "shadcn"))).toBe(join(root, ".agents", "skills", "shadcn"));
+    expect((await stat(join(store, "shadcn"))).isDirectory()).toBe(true);
+    expect(await readlink(join(store, "inside"))).toBe("own");
+  });
+});
+

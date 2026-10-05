@@ -71,6 +71,41 @@ describe("two profiles sharing one store", () => {
     expect(await readFile(result.backups[0]!, "utf8")).toBe('{"model":"second"}');
   });
 
+  it("merges prompt history instead of keeping only the seed's", async () => {
+    const line = (d: string, t: number) => JSON.stringify({ display: d, timestamp: t });
+    await fh.profile("default", { "history.jsonl": line("first", 1) + "\n" + line("third", 3) + "\n" });
+    await fh.profile("me", { "history.jsonl": line("second", 2) + "\n" });
+
+    await sync("default");
+    const result = await sync("me");
+
+    const merged = (await readFile(join(fh.store, "history.jsonl"), "utf8")).trim().split("\n");
+    expect(merged.map((l) => JSON.parse(l).display)).toEqual(["first", "second", "third"]);
+    expect(result.backups).toHaveLength(1);
+    expect((await lstat(join(fh.home, ".claude-me", "history.jsonl"))).isSymbolicLink()).toBe(true);
+  });
+
+  it("merges a session both accounts continued, so neither branch is hidden", async () => {
+    const msg = (uuid: string, parent: string | null, t: string) =>
+      JSON.stringify({ uuid, parentUuid: parent, timestamp: `2026-10-0${t}T00:00:00.000Z`, sessionId: "s" });
+    const common = [msg("a", null, "1"), msg("b", "a", "2")];
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    for (const [name, tail] of [["default", msg("c", "b", "3")], ["me", msg("d", "b", "4")]] as const) {
+      const dir = join(fh.home, name === "default" ? ".claude" : ".claude-me", "projects", "-app");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "s.jsonl"), [...common, tail].join("\n") + "\n");
+    }
+
+    await sync("default");
+    const result = await sync("me");
+
+    const lines = (await readFile(join(fh.store, "projects", "-app", "s.jsonl"), "utf8")).trim().split("\n");
+    expect(lines.map((l) => JSON.parse(l).uuid)).toEqual(["a", "b", "c", "d"]);
+    expect(result.merged).toHaveLength(1);
+    expect(result.collisions).toHaveLength(0);
+    expect(result.backups).toHaveLength(1);
+  });
+
   it("unions directories and backs up only the colliding files", async () => {
     await fh.profile("default", { skills: ["shared.md", "mine.md"] });
     await fh.profile("me", { skills: ["shared.md", "theirs.md"] });

@@ -7,13 +7,13 @@ import type { Item, Role } from "../types.js";
  */
 export const INVENTORY: Item[] = [
   // Context. This is what the store exists for.
-  { name: "projects", kind: "dir", role: "shared", note: "session transcripts" },
+  { name: "projects", kind: "dir", role: "shared", note: "session transcripts", merge: "lines" },
   { name: "todos", kind: "dir", role: "shared", note: "per-session todo lists" },
   { name: "file-history", kind: "dir", role: "shared", note: "edit history behind /rewind" },
   { name: "session-env", kind: "dir", role: "shared", note: "per-session environment" },
   { name: "tasks", kind: "dir", role: "shared", note: "background task state" },
   { name: "paste-cache", kind: "dir", role: "shared", note: "pasted content referenced by transcripts" },
-  { name: "history.jsonl", kind: "file", role: "shared", note: "prompt history" },
+  { name: "history.jsonl", kind: "file", role: "shared", note: "prompt history", merge: "lines" },
 
   // Authored assets.
   { name: "skills", kind: "dir", role: "shared" },

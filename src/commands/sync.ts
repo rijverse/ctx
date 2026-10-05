@@ -109,6 +109,7 @@ async function run(args: Parsed, mode: "sync" | "detach"): Promise<number> {
       }
       if (mode === "sync") await foldRegistry(profile, ctx);
     }
+    if (mode === "sync") await linkLate([...plans.keys()], ctx);
   });
 
   out();
@@ -132,6 +133,19 @@ async function seedOverrides(
   const held = await heldBySeed(seed, ctx.store, ctx.config, ctx.only);
   const seeded = [...plans.values()].flatMap((p) => p.effective.filter((s) => s.kind === "seed").map((s) => s.item.name));
   return [...new Set(seeded.filter((name) => held.has(name)))];
+}
+
+/**
+ * A profile synced early in a run cannot link what a later one brought into
+ * the store, plans from the third profile, say. One more pass attaches those.
+ */
+async function linkLate(profiles: Profile[], ctx: Ctx): Promise<void> {
+  for (const profile of profiles) {
+    const late = (await planSync(profile, ctx.store, ctx.config, ctx.only)).effective.filter((s) => s.kind === "attach");
+    if (late.length === 0) continue;
+    await apply({ steps: late, effective: late }, ctx.store, ctx.config, { verbose: ctx.verbose });
+    out(`${green("ok")} ${pad(profile.name, 12)} also linked ${late.map((s) => s.item.name).join(", ")}`);
+  }
 }
 
 /** A broken .claude.json must not abort a sync whose files already moved. */

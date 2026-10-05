@@ -489,4 +489,13 @@ describe("ctx CLI", () => {
     });
   });
 
+
+  it("links what a later profile brought in to the ones synced before it", async () => {
+    await fh.profile("me", { plans: ["p.md"] });
+    await ctx("init", "-y");
+    await ctx("sync", "--all", "-y");
+    expect((await lstat(join(fh.home, ".claude", "plans"))).isSymbolicLink()).toBe(true);
+    expect((await lstat(join(fh.home, ".claude-me", "skills"))).isSymbolicLink()).toBe(true);
+  });
+
 });

@@ -7,6 +7,7 @@ import {
   exists,
   mergeTree,
   move,
+  mergeLines,
   removeEmptyDirs,
   replaceSymlink,
 } from "../util/fsx.js";
@@ -19,6 +20,8 @@ export interface ApplyResult {
   done: number;
   backups: string[];
   collisions: string[];
+  /** Files both sides had that were folded together, originals in the backup. */
+  merged: string[];
 }
 
 /**
@@ -34,7 +37,7 @@ export async function apply(
   config: Config,
   opts: { verbose?: boolean } = {},
 ): Promise<ApplyResult> {
-  const result: ApplyResult = { done: 0, backups: [], collisions: [] };
+  const result: ApplyResult = { done: 0, backups: [], collisions: [], merged: [] };
   if (plan.effective.length === 0) return result;
 
   const stamp = timestamp();
@@ -53,8 +56,16 @@ export async function apply(
         break;
 
       case "absorb": {
-        const collided = await mergeTree(step.from, step.to);
-        result.collisions.push(...collided);
+        if (step.item.kind === "file") {
+          await mergeLines(step.from, step.to);
+          await stash(step, backupDir, config, result);
+          await replaceSymlink(step.from, step.to);
+          break;
+        }
+        const combine = step.item.merge === "lines" ? mergeJsonl : undefined;
+        const { kept, merged } = await mergeTree(step.from, step.to, combine);
+        result.collisions.push(...kept);
+        result.merged.push(...merged);
         // What is left should be empty directories. Anything else, a collision
         // or a file something wrote mid-merge, goes to backups, never to rm.
         await removeEmptyDirs(step.from);
@@ -131,11 +142,20 @@ function timestamp(): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
+async function mergeJsonl(src: string, dst: string): Promise<boolean> {
+  if (!src.endsWith(".jsonl")) return false;
+  await mergeLines(src, dst);
+  return true;
+}
+
 export function warnCollisions(result: ApplyResult): void {
+  if (result.merged.length > 0) {
+    out(dim(`  ${result.merged.length} transcript(s) were in both and are merged. The originals are in the backup.`));
+  }
   if (result.collisions.length === 0) return;
   out(
     yellow(
-      `  ${result.collisions.length} path(s) already existed in the store and were kept; your copies are in the backup.`,
+      `  ${result.collisions.length} path(s) already existed in the store and were kept. Your copies are in the backup.`,
     ),
   );
 }

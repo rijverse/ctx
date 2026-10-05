@@ -1,6 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import type { EntryState, Plan, Profile, Step, StepKind } from "../types.js";
+import type { EntryState, Item, Plan, Profile, Step, StepKind } from "../types.js";
 import { exists, samePath } from "../util/fsx.js";
 import type { Config } from "./config.js";
 import { isGuarded, itemByName } from "./inventory.js";
@@ -59,7 +59,7 @@ export async function planSync(
       to,
       state,
       storeHas,
-      ...classify(state, storeHas),
+      ...classify(state, storeHas, item),
     });
   }
 
@@ -69,6 +69,7 @@ export async function planSync(
 function classify(
   state: EntryState,
   storeHas: boolean,
+  item: Item,
 ): { kind: StepKind; detail?: string } {
   switch (state) {
     case "linked":
@@ -84,9 +85,10 @@ function classify(
         ? { kind: "absorb", detail: "merge into the store, store copy wins on collisions" }
         : { kind: "seed", detail: "becomes the store's copy" };
     case "file":
-      return storeHas
-        ? { kind: "stash", detail: "store copy wins, yours is backed up" }
-        : { kind: "seed", detail: "becomes the store's copy" };
+      if (!storeHas) return { kind: "seed", detail: "becomes the store's copy" };
+      return item.merge === "lines"
+        ? { kind: "absorb", detail: "lines merged into the store's by time, yours is backed up" }
+        : { kind: "stash", detail: "store copy wins, yours is backed up" };
   }
 }
 

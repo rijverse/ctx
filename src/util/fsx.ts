@@ -16,7 +16,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { CtxError } from "./ui.js";
 
 export async function exists(p: string): Promise<boolean> {
@@ -122,6 +122,7 @@ export async function move(from: string, to: string): Promise<void> {
   await ensureDir(dirname(to));
   try {
     await rename(from, to);
+    await keepLinksPointing(from, to);
     return;
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
@@ -129,6 +130,33 @@ export async function move(from: string, to: string): Promise<void> {
   }
   await cp(from, to, { recursive: true, verbatimSymlinks: true });
   await rm(from, { recursive: true, force: true });
+  await keepLinksPointing(from, to);
+}
+
+/**
+ * A relative symlink means something only from where it sits. Moved to another
+ * depth, skills/x -> ../../.agents/skills/x would point somewhere else, so a
+ * link that leaves the moved tree is rewritten to the absolute path it had.
+ * Links within the tree move with it and stay as they are.
+ */
+async function keepLinksPointing(from: string, to: string): Promise<void> {
+  if (dirname(from) === dirname(to)) return;
+  const walk = async (path: string, rel: string): Promise<void> => {
+    const st = await lstat(path);
+    if (st.isSymbolicLink()) {
+      const target = await readlink(path);
+      if (isAbsolute(target)) return;
+      const before = resolve(dirname(join(from, rel)), target);
+      if (before === from || before.startsWith(from + sep)) return;
+      if (resolve(dirname(path), target) === before) return;
+      await rm(path);
+      await symlink(before, path);
+      return;
+    }
+    if (!st.isDirectory()) return;
+    for (const name of await readdir(path)) await walk(join(path, name), join(rel, name));
+  };
+  await walk(to, "");
 }
 
 export async function copyInto(from: string, to: string): Promise<void> {
@@ -177,19 +205,27 @@ export async function removeEmptyDirs(dir: string): Promise<void> {
 }
 
 /**
- * Merge `from` into `to` without ever clobbering: a path already present in the
- * destination is left as it is and reported back, so the caller can decide
- * whether that counts as a conflict worth mentioning.
+ * Merge `from` into `to` without ever clobbering. A path already present in the
+ * destination is left as it is and reported back, unless `combine` knows how to
+ * fold the two files together. Either way the source copy stays where it was,
+ * for the caller to back up.
  */
-export async function mergeTree(from: string, to: string): Promise<string[]> {
+export async function mergeTree(
+  from: string,
+  to: string,
+  combine?: (src: string, dst: string) => Promise<boolean>,
+): Promise<{ kept: string[]; merged: string[] }> {
   const kept: string[] = [];
+  const merged: string[] = [];
   await ensureDir(to);
   for (const entry of await readdir(from, { withFileTypes: true })) {
     const src = join(from, entry.name);
     const dst = join(to, entry.name);
     if (entry.isDirectory()) {
       if (await isDir(dst)) {
-        kept.push(...(await mergeTree(src, dst)));
+        const inner = await mergeTree(src, dst, combine);
+        kept.push(...inner.kept);
+        merged.push(...inner.merged);
       } else if (await exists(dst)) {
         kept.push(dst);
       } else {
@@ -197,13 +233,15 @@ export async function mergeTree(from: string, to: string): Promise<string[]> {
       }
       continue;
     }
-    if (await exists(dst)) {
-      kept.push(dst);
-    } else {
+    if (!(await exists(dst))) {
       await move(src, dst);
+    } else if (combine !== undefined && entry.isFile() && (await lstat(dst)).isFile() && (await combine(src, dst))) {
+      merged.push(dst);
+    } else {
+      kept.push(dst);
     }
   }
-  return kept;
+  return { kept, merged };
 }
 
 export async function dirSize(p: string): Promise<number> {
@@ -240,5 +278,62 @@ export async function isWritable(p: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Fold the lines of one JSONL log into another, ordered by each entry's
+ * `timestamp`. That suits prompt history, and transcripts too: a transcript is
+ * a tree of messages linked by uuid, so two copies of one session that went on
+ * separately under two accounts merge into one file holding both branches,
+ * which is what Claude itself writes after a rewind. Exact duplicates are dropped, so merging a copy back in is
+ * harmless, and a line with no timestamp keeps its place after its neighbour.
+ *
+ * Something may append to `to` while this runs, a session in a profile that
+ * already links it. The write is only made if `to` has not grown since it was
+ * read. Otherwise the merge starts over from what is there now.
+ */
+export async function mergeLines(from: string, to: string): Promise<void> {
+  const theirs = await readFile(from, "utf8");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const ours = await readFile(to, "utf8");
+    // Most pairs are one copy, or one copy and its continuation. Only copies
+    // that really went separate ways need every line parsed and ordered.
+    if (ours.startsWith(theirs)) return;
+    if (theirs.startsWith(ours)) {
+      if ((await stat(to)).size !== Buffer.byteLength(ours)) continue;
+      await writeAtomic(to, theirs);
+      return;
+    }
+    const seen = new Set<string>();
+    const rows: { line: string; at: number; order: number }[] = [];
+    for (const text of [ours, theirs]) {
+      let last = 0;
+      for (const line of text.split("\n")) {
+        if (line.trim() === "" || seen.has(line)) continue;
+        seen.add(line);
+        last = timestampOf(line) ?? last;
+        rows.push({ line, at: last, order: rows.length });
+      }
+    }
+    rows.sort((a, b) => a.at - b.at || a.order - b.order);
+    const merged = rows.map((r) => r.line).join("\n") + "\n";
+
+    if (merged === ours) return;
+    if ((await stat(to)).size !== Buffer.byteLength(ours)) continue;
+    await writeAtomic(to, merged);
+    return;
+  }
+  throw new CtxError(`${to} kept changing while it was being merged. Close the claude sessions using it and run this again.`);
+}
+
+/** Prompt history stamps entries in epoch ms, transcripts in ISO strings. */
+function timestampOf(line: string): number | undefined {
+  try {
+    const t = (JSON.parse(line) as { timestamp?: unknown }).timestamp;
+    const ms = typeof t === "string" ? Date.parse(t) : t;
+    return typeof ms === "number" && Number.isFinite(ms) ? ms : undefined;
+  } catch {
+    return undefined;
   }
 }

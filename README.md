@@ -268,6 +268,15 @@ The tool is built so an interrupted run is always safe to re-run.
 - Directories are merged without clobbering. When the same path exists on both
   sides the store copy wins and yours is kept in the backup, reported by count
   at the end.
+- Session transcripts and `history.jsonl` are the exception: two copies are
+  merged line by line in time order, so nothing either account wrote is
+  hidden. A session two accounts both continued ends up as one transcript with
+  both branches, the same shape Claude writes after a rewind. The originals
+  still go to the backup.
+- Relative symlinks inside a moved item, like a skill linked from
+  `~/.agents`, are rewritten when the move would change what they point at.
+- `sync --all` finishes with a pass that links what later profiles brought in,
+  so every profile ends up linked to every shared item.
 - Identity files are guarded in code, not just in config.
 - Every destructive command prints its plan and asks once.
 - `ctx detach` reads from the live store, not from backups, so it works even if
@@ -296,8 +305,9 @@ archive or remove it yourself.
   are separate files with unique ids.
 - `history.jsonl` is a single append-only file, so two sessions writing it at
   once can interleave. Drop it from `shared` in `ctx.json` if that bothers you.
-  It is also not merged when profiles are first folded in: the seed's history
-  is kept, and every other profile's goes to its backup.
+- When accounts disagree on a plugin's install record, the seed's wins, so a
+  plugin installed only in another account may need installing once more. Its
+  old record is in that account's backup.
 - Removing every MCP server, or every project, from one account reads as a
   reset and does not spread. Remove them one at a time, or edit
   `<store>/registry.json`, if that is really what you want.

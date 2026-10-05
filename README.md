@@ -1,6 +1,10 @@
 # ctx
 
-One source of truth for every Claude Code account on a machine.
+[![ci](https://github.com/rijverse/ctx/actions/workflows/ci.yml/badge.svg)](https://github.com/rijverse/ctx/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+One source of truth for every Claude Code account on a machine: shared
+sessions, skills, settings and trusted projects, separate logins.
 
 Claude Code keeps everything in one directory, `~/.claude` by default, and
 `CLAUDE_CONFIG_DIR` moves that directory somewhere else. So running a second
@@ -21,11 +25,14 @@ One store holds the only real copy of everything shareable. Each profile
 directory keeps its identity files and gets a symlink for the rest.
 
 ```
-~/.ctx-store/              the only real copy
+~/.ctx-store/                 the only real copy
   projects/  skills/  agents/  commands/  rules/  plans/
   todos/  file-history/  plugins/
   settings.json  CLAUDE.md  history.jsonl
   registry.json               the shared half of .claude.json
+  ctx.json                    what is shared, the seed, extra profile dirs
+  .bases/                     merge history for .claude.json, per profile
+  .backups/                   anything ctx displaced, per profile and run
 
 ~/.claude/                    derived
   .credentials.json           real, yours alone
@@ -45,7 +52,13 @@ it under another: it is the same directory on disk.
 
 ## Install
 
-Node 20 or newer.
+Node 20 or newer, on Linux or macOS.
+
+```sh
+npm install -g @rijverse/ctx
+```
+
+Or from a checkout:
 
 ```sh
 npm install
@@ -53,19 +66,29 @@ npm run build
 npm link          # optional, puts `ctx` on your PATH
 ```
 
-Or run it in place with `node dist/cli.js <command>`.
+and run it in place with `node dist/cli.js <command>` if you skip the link.
 
 ## Quick start
 
+Close every running `claude` session first. `sync` refuses a profile while
+one is open in it.
+
 ```sh
-ctx init            # create the store, seeded from ~/.claude
-ctx sync --all      # fold every profile into it
+ctx init            # create the store, with ~/.claude as its seed
+ctx sync --all      # fold every profile into it, the seed first
 ctx status          # see the result
 ctx run me          # launch claude as ~/.claude-me, shared data
 ```
 
 Nothing is written until you confirm. `--dry-run` prints the plan and stops,
 `-y` skips the prompt.
+
+To move an existing machine over with a backup first and one trial profile
+before the rest, use the script in this repo:
+
+```sh
+./rollout.sh [--add DIR,DIR] [--seed PROFILE] [trial-profile]
+```
 
 ### The seed
 
@@ -100,9 +123,6 @@ parent (`~/work/.claude` is `work`), and any other directory goes by its own
 name. Two profiles can never share a name, because backups and merge history
 are kept by it. When two would, ctx stops and asks for `--as`.
 
-`rollout.sh` in this repo walks a machine through all of this with a backup
-first: `./rollout.sh [--add DIR,DIR] [--seed PROFILE] [trial-profile]`.
-
 ## What is shared, and what is never shared
 
 Shared, moved into the store once and symlinked back:
@@ -119,9 +139,9 @@ Shared, moved into the store once and symlinked back:
 Never shared, and `ctx` refuses to move them even if you edit the config to say
 otherwise:
 
-`.credentials.json`, `.claude.json`, `policy-limits.json`,
-`remote-settings.json`, `stats-cache.json`, `settings.local.json`,
-`mcp-needs-auth-cache.json`
+`.credentials.json`, `.claude.json`, `policy-limits.json` (and its
+`.stamp.json`), `remote-settings.json`, `stats-cache.json`,
+`settings.local.json`, `mcp-needs-auth-cache.json`
 
 Left alone entirely, neither shared nor guarded: `cache`, `sessions`,
 `shell-snapshots`, `ide`, `telemetry`, `backups`, `chrome`, `daemon`, `jobs`,
@@ -180,9 +200,11 @@ ctx registry push me        # profile -> store
 If you start `claude` some other way, `ctx hooks install` adds a `SessionEnd`
 hook to the shared `settings.json` so the session still folds its changes back
 into the store on exit. A non-default `--store` is written into the hook, and
-installing again after moving `ctx` updates the path in place. Only the push half is hookable: `SessionStart` fires
-after Claude has already read `.claude.json`, so pulling there would be
-overwritten by Claude's own next save. Pulling stays the job of `ctx run`.
+installing again after moving `ctx` updates the path in place.
+
+Only the push half is hookable. `SessionStart` fires after Claude has already
+read `.claude.json`, so pulling there would be overwritten by Claude's own next
+save. Pulling stays the job of `ctx run`.
 
 ## Commands
 
@@ -191,10 +213,10 @@ overwritten by Claude's own next save. Pulling stays the job of `ctx run`.
 | `ctx init [--from <profile>] [--add <dir>,...] [--as <name>]` | Create the store and pick its seed. |
 | `ctx add <dir>... [--as <name>]` | Manage a profile outside `~/.claude-*`, or rename one. |
 | `ctx sync [profile...] [--all] [--force]` | Move a profile's data into the store and symlink it back. |
-| `ctx status` (alias `ls`) | Per-profile, per-item state in one grid. |
+| `ctx status` (aliases `ls`, `st`) | Per-profile, per-item state in one grid, plus Claude dirs not yet managed. |
 | `ctx run <profile> [-- <args>]` | Launch `claude` with the shared registry in place. |
-| `ctx detach [profile...] [--force]` | Give a profile back its own independent copies. |
-| `ctx doctor [profile...]` | Find and repair broken or misdirected links, and flag real copies where a link should be. |
+| `ctx detach [profile...] [--all] [--force]` | Give a profile back its own independent copies. |
+| `ctx doctor [profile...]` (alias `repair`) | Find and repair broken or misdirected links, and flag real copies where a link should be. |
 | `ctx registry <show\|pull\|push\|diff>` | Drive the `.claude.json` split by hand. |
 | `ctx hooks <status\|install\|uninstall>` | Wire sessions you did not start with `ctx run` into the store. |
 | `ctx which [profile]` | Print the `CLAUDE_CONFIG_DIR` export for a profile. |
@@ -227,6 +249,20 @@ The tool is built so an interrupted run is always safe to re-run.
 - Every destructive command prints its plan and asks once.
 - `ctx detach` reads from the live store, not from backups, so it works even if
   you deleted them.
+- The store holds everything sensitive Claude keeps apart from logins:
+  transcripts, prompt history, and MCP server settings that may carry API keys.
+  Treat it like `~/.claude`. Its registry files are written `0600`.
+
+## Undo
+
+```sh
+ctx hooks uninstall     # first, or every profile keeps a copy of the hook
+ctx detach --all        # every profile gets real copies back
+```
+
+After that the profiles no longer use the store. Keep `~/.ctx-store` until you
+are happy, since `.backups/` holds anything ctx displaced along the way, then
+archive or remove it yourself.
 
 ## Caveats
 
@@ -237,6 +273,8 @@ The tool is built so an interrupted run is always safe to re-run.
   are separate files with unique ids.
 - `history.jsonl` is a single append-only file, so two sessions writing it at
   once can interleave. Drop it from `shared` in `ctx.json` if that bothers you.
+  It is also not merged when profiles are first folded in: the seed's history
+  is kept, and every other profile's goes to its backup.
 - Removing every MCP server, or every project, from one account reads as a
   reset and does not spread. Remove them one at a time, or edit
   `<store>/registry.json`, if that is really what you want.
@@ -268,6 +306,16 @@ Other tools that live in `~/.claude-*`, and old `ctx` stores, are skipped.
 `profiles` adds directories on top of those, by path or with a name, and is
 what `ctx add` writes. A store that sits inside a profile, or the other way
 round, is refused.
+
+## Environment
+
+| variable | effect |
+|---|---|
+| `CTX_STORE` | store location, same as `--store` |
+| `CTX_HOME` | treat another directory as home, which is how the tests stay off yours |
+| `CTX_DEBUG` | print a stack trace with unexpected errors |
+| `NO_COLOR` | plain output |
+| `CLAUDE_CONFIG_DIR` | read by the hook to know which profile a session belonged to |
 
 ## Testing
 

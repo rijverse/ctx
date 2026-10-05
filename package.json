@@ -13,7 +13,6 @@
   "bin": {
     "ctx": "./dist/cli.js"
   },
-  "main": "./dist/cli.js",
   "files": [
     "dist",
     "README.md",
@@ -33,13 +32,20 @@
   "engines": {
     "node": ">=20"
   },
+  "os": [
+    "linux",
+    "darwin"
+  ],
   "keywords": [
     "claude-code",
     "claude",
+    "anthropic",
     "cli",
+    "multi-account",
     "accounts",
     "profiles",
     "context",
+    "CLAUDE_CONFIG_DIR",
     "symlink"
   ],
   "license": "MIT",
@@ -47,5 +53,8 @@
     "@types/node": "^22.7.4",
     "typescript": "^5.6.2",
     "vitest": "^2.1.1"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -39,21 +39,21 @@ async function hookInner(args: Parsed): Promise<number> {
 
 function usage(): void {
   out();
-  out(`${bold("ctx")} ${dim(VERSION)}  one source of truth for every Claude account on this machine`);
+  out(`${bold("ctx")} ${dim(VERSION)}  one source of truth for every Claude Code account on this machine`);
   out();
   out(bold("Commands"));
-  out(`  init [--from P] [--add D,..] create the store and choose what it owns`);
-  out(`  add <dir>... [--as name]    manage a profile dir outside ~/.claude-*, or rename one`);
-  out(`  sync [profile...] [--all]   move a profile's data into the store and symlink it back`);
-  out(`  status                      what every profile shares, and what it does not`);
-  out(`  run <profile> [-- args]     launch claude for a profile with the shared registry`);
-  out(`  detach [profile...]         hand a profile back its own independent copies`);
-  out(`  doctor [profile...]         find and repair broken links`);
+  out(`  init [--from P] [--add D,...]   create the store and pick the profile it starts from`);
+  out(`  add <dir>... [--as name]        manage a profile dir outside ~/.claude-*, or rename one`);
+  out(`  sync [profile...] [--all]       move a profile's data into the store and symlink it back`);
+  out(`  status                          what every profile shares, and what it does not (ls, st)`);
+  out(`  run <profile> [-- args]         launch claude for a profile with the shared registry`);
+  out(`  detach [profile...] [--all]     hand a profile back its own independent copies`);
+  out(`  doctor [profile...]             repair broken links, flag copies that should be links (repair)`);
   out(`  registry <show|pull|push|diff> [profile]`);
-  out(`                              the .claude.json split: shared context, private identity`);
+  out(`                                  the .claude.json split: shared context, private identity`);
   out(`  hooks <status|install|uninstall>`);
-  out(`                              fold sessions you did not start with \`ctx run\` into the store`);
-  out(`  which [profile]             print the CLAUDE_CONFIG_DIR export for a profile`);
+  out(`                                  fold sessions you did not start with \`ctx run\` into the store`);
+  out(`  which [profile]                 print the CLAUDE_CONFIG_DIR export for a profile`);
   out();
   out(bold("Flags"));
   out(`  -n, --dry-run   print the plan, change nothing`);

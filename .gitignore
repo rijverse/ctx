@@ -5,6 +5,7 @@ dist/
 .env
 .env.local
 coverage/
+*.tgz
 *.tsbuildinfo
 .idea
 # local one-off helper, not part of the project

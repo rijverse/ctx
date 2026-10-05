@@ -412,4 +412,81 @@ describe("ctx CLI", () => {
     expect(config.seed).toBe("my-claude");
   });
 
+
+  describe("starting from nothing", () => {
+    /** A claude that writes a first session the way the real one lays it out. */
+    async function fakeClaude(): Promise<string> {
+      const bin = join(fh.home, "bin");
+      await mkdir(bin, { recursive: true });
+      await writeFile(
+        join(bin, "claude"),
+        [
+          "#!/bin/sh",
+          'd="$CLAUDE_CONFIG_DIR"',
+          'mkdir -p "$d/projects/-app"',
+          'echo "{}" > "$d/projects/-app/$FAKE_WHO.jsonl"',
+          'echo "{\\"who\\":\\"$FAKE_WHO\\"}" >> "$d/history.jsonl"',
+          '[ -e "$d/settings.json" ] || echo "{\\"theme\\":\\"$FAKE_WHO\\"}" > "$d/settings.json"',
+          'echo "{\\"token\\":\\"$FAKE_WHO\\"}" > "$d/.credentials.json"',
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      return bin;
+    }
+    const launch = (bin: string, who: string, ...argv: string[]) =>
+      run(process.execPath, [CLI, "run", ...argv], {
+        env: { ...process.env, CTX_HOME: fh.home, NO_COLOR: "1", FAKE_WHO: who, PATH: `${bin}:${process.env.PATH}` },
+      });
+
+    beforeEach(async () => {
+      const { rm } = await import("node:fs/promises");
+      for (const d of [".claude", ".claude-me"]) await rm(join(fh.home, d), { recursive: true });
+      await rm(join(fh.home, ".claude.json"));
+    });
+
+    it("creates an empty store with no seed yet", async () => {
+      const { stdout, code } = await ctx("init", "-y");
+      expect(code).toBe(0);
+      expect(stdout).toContain("starts empty");
+      const config = JSON.parse(await readFile(join(fh.home, ".ctx-store", "ctx.json"), "utf8"));
+      expect(config.seed).toBeUndefined();
+    });
+
+    it("links every account from its first session, and the first one seeds", async () => {
+      await ctx("init", "-y");
+      const bin = await fakeClaude();
+
+      const first = await launch(bin, "alice", "default");
+      expect(first.stdout).toContain("into the store and linked");
+      const config = JSON.parse(await readFile(join(fh.home, ".ctx-store", "ctx.json"), "utf8"));
+      expect(config.seed).toBe("default");
+
+      const second = await launch(bin, "bob", "work");
+      expect(second.stdout).toContain("linked projects");
+
+      for (const d of [".claude", ".claude-work"]) {
+        for (const item of ["projects", "history.jsonl", "settings.json"]) {
+          expect((await lstat(join(fh.home, d, item))).isSymbolicLink()).toBe(true);
+        }
+        expect((await lstat(join(fh.home, d, ".credentials.json"))).isSymbolicLink()).toBe(false);
+      }
+      const { readdir } = await import("node:fs/promises");
+      expect((await readdir(join(fh.home, ".ctx-store", "projects", "-app"))).sort()).toEqual(["alice.jsonl", "bob.jsonl"]);
+      expect(await readFile(join(fh.home, ".ctx-store", "settings.json"), "utf8")).toContain("alice");
+      expect(await readFile(join(fh.home, ".claude-work", ".credentials.json"), "utf8")).toContain("bob");
+    });
+
+    it("leaves a profile that was detached on purpose alone", async () => {
+      await ctx("init", "-y");
+      const bin = await fakeClaude();
+      await launch(bin, "alice", "default");
+      await launch(bin, "bob", "work");
+      await ctx("detach", "work", "-y");
+
+      const again = await launch(bin, "bob", "work");
+      expect(again.stdout).toContain("work is not synced into the store yet");
+      expect((await lstat(join(fh.home, ".claude-work", "projects"))).isSymbolicLink()).toBe(false);
+    });
+  });
+
 });

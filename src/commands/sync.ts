@@ -1,7 +1,7 @@
 import type { Plan, Profile } from "../types.js";
 import { apply, warnCollisions } from "../core/apply.js";
 import { liveSessions } from "../core/live.js";
-import { planDetach, planSync } from "../core/plan.js";
+import { heldBySeed, planDetach, planSync } from "../core/plan.js";
 import { storeLockPath, tilde } from "../core/paths.js";
 import { listProfiles, selectProfiles } from "../core/profiles.js";
 import { push } from "../core/session.js";
@@ -129,11 +129,9 @@ async function seedOverrides(
 ): Promise<string[]> {
   const seed = all.find((p) => p.name === ctx.config.seed);
   if (seed === undefined || wanted.includes(seed)) return [];
-  const own = (await planSync(seed, ctx.store, ctx.config, ctx.only)).steps
-    .filter((s) => s.state === "dir" || s.state === "file")
-    .map((s) => s.item.name);
+  const held = await heldBySeed(seed, ctx.store, ctx.config, ctx.only);
   const seeded = [...plans.values()].flatMap((p) => p.effective.filter((s) => s.kind === "seed").map((s) => s.item.name));
-  return [...new Set(seeded.filter((name) => own.includes(name)))];
+  return [...new Set(seeded.filter((name) => held.has(name)))];
 }
 
 /** A broken .claude.json must not abort a sync whose files already moved. */

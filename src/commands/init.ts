@@ -54,10 +54,12 @@ export async function init(args: Parsed): Promise<number> {
   }
 
   if (profiles.length === 0) {
-    fail(
-      `no Claude config directories to manage under ${tilde(home())}. Run claude once first, ` +
-        "or name yours with `ctx init --add <dir>`.",
-    );
+    // Found dirs nobody was asked about are far likelier to be the user's
+    // accounts than a reason to start from nothing.
+    if (found.length > 0 && (g.yes || !process.stdin.isTTY)) {
+      fail(`nothing is managed yet. Take your Claude dir in with --add, for example \`ctx init --add ${tilde(found[0]!.dir)}\`.`);
+    }
+    return startEmpty(store, config, args);
   }
 
   // Whoever seeds the store decides whose settings.json and plugins everyone
@@ -138,5 +140,44 @@ export async function init(args: Parsed): Promise<number> {
   out(bold("Next"));
   out(`  ctx sync --all    ${dim("fold every profile into the store")}`);
   out(`  ctx status        ${dim("check the result")}`);
+  return 0;
+}
+
+/**
+ * Nobody has used Claude here yet. The store starts empty, and the first
+ * account started with `ctx run` fills it and becomes the seed, unless --from
+ * names one up front.
+ */
+async function startEmpty(store: string, config: Config, args: Parsed): Promise<number> {
+  const g = globals(args);
+  const from = flagString(args, "from");
+  if (from !== undefined && !isProfileName(from)) fail(`--from ${from}: not a usable profile name`);
+  if (from !== undefined) config.seed = from;
+  else delete config.seed;
+
+  out();
+  out(`${bold("Store")}  ${cyan(tilde(store))}`);
+  out();
+  out(`No Claude profiles under ${tilde(home())} yet, so the store starts empty.`);
+  out(dim(`  The first account you start with \`ctx run\` fills it${from === undefined ? " and becomes its seed" : ""}.`));
+  out();
+
+  if (g.dryRun) {
+    out(dim("--dry-run: nothing was changed."));
+    return 0;
+  }
+  if (!g.yes && !(await confirm("Create the empty store?"))) {
+    out(yellow("Cancelled. Nothing was changed."));
+    return 1;
+  }
+  await ensureDir(store);
+  await saveConfig(store, config);
+
+  out();
+  out(green(`Created ${tilde(store)}`));
+  out();
+  out(bold("Next, once per account"));
+  out(`  ctx run default   ${dim("~/.claude, the account plain `claude` uses. Log in, use it, exit.")}`);
+  out(`  ctx run work      ${dim("~/.claude-work, a second login that shares everything else")}`);
   return 0;
 }

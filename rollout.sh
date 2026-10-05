@@ -119,7 +119,9 @@ while IFS=$'\t' read -r kind name dir pids; do
   dirs+=("$dir")
   [[ -z $pids ]] || running+="  $name (pid ${pids// /, })"$'\n'
 done <<<"$list"
-((${#names[@]} > 0)) || stop "No Claude profiles found. Point at yours with --add DIR,DIR."
+((${#names[@]} > 0)) || stop "No Claude profiles found, so there is nothing to move over.
+Starting fresh needs no script: \`ctx init\`, then \`ctx run default\` and \`ctx run <name>\` once per account.
+If yours live somewhere unusual, point at them with --add DIR,DIR."
 for i in "${!names[@]}"; do printf '  %-14s %s\n' "${names[$i]}" "$(short "${dirs[$i]}")"; done
 if [[ -n $running ]]; then
   printf 'claude is still running in:\n%s' "$running"

@@ -83,6 +83,29 @@ ctx run me          # launch claude as ~/.claude-me, shared data
 Nothing is written until you confirm. `--dry-run` prints the plan and stops,
 `-y` skips the prompt.
 
+### Starting from nothing
+
+No Claude accounts on the machine yet? Install
+[Claude Code](https://claude.com/claude-code), then:
+
+```sh
+ctx init            # an empty store
+ctx run default     # ~/.claude, the account plain `claude` uses: log in, use it, exit
+ctx run work        # ~/.claude-work: log in with the second account
+```
+
+`ctx run` creates a profile that does not exist yet and links whatever the
+store already has before `claude` starts, so a new account sees the shared
+sessions, skills and settings from its first session. When the session ends,
+anything the store had no copy of yet moves in and is linked. The first account
+to fill the store becomes its seed. If `claude` starts without asking you to log
+in, type `/login`. After the first `ctx run default`, plain `claude` works too.
+
+`ctx run` only links a profile that is new or already linked. One you detached
+on purpose, holding its own copies, is left alone.
+
+### Moving an existing machine over
+
 To move an existing machine over with a backup first and one trial profile
 before the rest, use the script in this repo:
 

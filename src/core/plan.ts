@@ -137,3 +137,18 @@ export async function planRepair(
   );
   return { steps, effective: steps.filter((s) => s.kind !== "keep") };
 }
+
+/**
+ * Items the seed profile still holds as its own copies. Nobody else may seed
+ * one of those into the store first, or theirs would win over the seed's.
+ */
+export async function heldBySeed(
+  seed: Profile | undefined,
+  store: string,
+  config: Config,
+  only?: string[],
+): Promise<Set<string>> {
+  if (seed === undefined) return new Set();
+  const plan = await planSync(seed, store, config, only);
+  return new Set(plan.steps.filter((s) => s.state === "dir" || s.state === "file").map((s) => s.item.name));
+}

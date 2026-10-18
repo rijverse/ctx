@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Profile } from "../types.js";
-import { isSameProcess } from "../util/proc.js";
+import { ancestors, cwdOf, isSameProcess, stopProcesses } from "../util/proc.js";
 
 /**
  * Pids of the claude sessions running in a profile right now. Claude writes
@@ -33,4 +33,31 @@ export async function liveSessions(profile: Profile): Promise<number[]> {
     if (await isSameProcess(pid, started)) live.push(pid);
   }
   return live.sort((a, b) => a - b);
+}
+
+export interface Running {
+  profile: Profile;
+  pid: number;
+  cwd?: string;
+  /** The session ctx was started from. Stopping it would stop ctx too. */
+  self: boolean;
+}
+
+export async function findRunning(profiles: Profile[]): Promise<Running[]> {
+  const mine = await ancestors();
+  const found: Running[] = [];
+  for (const profile of profiles) {
+    for (const pid of await liveSessions(profile)) {
+      found.push({ profile, pid, cwd: await cwdOf(pid), self: mine.has(pid) });
+    }
+  }
+  return found;
+}
+
+/** Stop every session in the list except ctx's own. Returns the ones still alive. */
+export async function stopRunning(running: Running[]): Promise<Running[]> {
+  const targets = running.filter((r) => !r.self);
+  if (targets.length === 0) return [];
+  const left = new Set(await stopProcesses(targets.map((r) => r.pid)));
+  return targets.filter((r) => left.has(r.pid));
 }

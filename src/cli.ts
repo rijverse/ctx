@@ -62,7 +62,6 @@ function usage(): void {
   out(`      --json      machine-readable output`);
   out(`      --only a,b  restrict to these items`);
   out(`      --store P   use a different store (default ~/.ctx-store)`);
-  out(`      --force     sync or detach even while claude is running there`);
   out();
   out(dim("  Identity is never shared. .credentials.json, entitlements and oauthAccount"));
   out(dim("  stay with the profile that owns them."));

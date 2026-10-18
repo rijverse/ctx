@@ -1,6 +1,6 @@
 import type { Plan, Profile } from "../types.js";
 import { apply, warnCollisions } from "../core/apply.js";
-import { liveSessions } from "../core/live.js";
+import { findRunning, stopRunning, type Running } from "../core/live.js";
 import { heldBySeed, planDetach, planSync } from "../core/plan.js";
 import { storeLockPath, tilde } from "../core/paths.js";
 import { listProfiles, selectProfiles } from "../core/profiles.js";
@@ -32,6 +32,17 @@ async function run(args: Parsed, mode: "sync" | "detach"): Promise<number> {
     return 1;
   }
 
+  // Left out of the run, an unsynced seed would see another profile's copies
+  // win over its own. Rather than refuse, it goes first.
+  const seedProfile = all.find((p) => p.name === seed);
+  if (mode === "sync" && seedProfile !== undefined && !wanted.includes(seedProfile)) {
+    const clash = await seedClashes(seedProfile, wanted, ctx);
+    if (clash.length > 0) {
+      out(yellow(`${seed} seeds the store and is not synced yet, so it is synced first. Otherwise ${clash.join(", ")} would replace its copies.`));
+      wanted.unshift(seedProfile);
+    }
+  }
+
   // Profiles are folded in one after another, so planning has to account for
   // what the earlier ones will have put in the store.
   const pending = new Set<string>();
@@ -46,13 +57,8 @@ async function run(args: Parsed, mode: "sync" | "detach"): Promise<number> {
   }
 
   // Moving a directory out from under a live session can race its writes, so
-  // profiles with claude running are refused unless --force says otherwise.
-  const running = new Map<Profile, number[]>();
-  for (const [p, plan] of plans) {
-    if (plan.effective.length === 0) continue;
-    const pids = await liveSessions(p);
-    if (pids.length > 0) running.set(p, pids);
-  }
+  // claude is stopped in every profile this run changes, once you confirm.
+  const running = await findRunning([...plans].filter(([, plan]) => plan.effective.length > 0).map(([p]) => p));
 
   const total = [...plans.values()].reduce((n, p) => n + p.effective.length, 0);
   if (ctx.json) {
@@ -65,23 +71,8 @@ async function run(args: Parsed, mode: "sync" | "detach"): Promise<number> {
     out(green(mode === "sync" ? "Everything is already linked." : "Nothing is linked."));
     return 0;
   }
-  const force = args.flags.has("force");
-  const overrides = mode === "sync" ? await seedOverrides(all, wanted, plans, ctx) : [];
-  if (overrides.length > 0) {
-    out(yellow(`${seed} seeds the store but is not synced yet, so these would replace its copies: ${overrides.join(", ")}.`));
-    if (!force && !ctx.dryRun) {
-      out(dim(`Sync ${seed} first (\`ctx sync ${seed}\`), include it in this run, or pass --force.`));
-      return 1;
-    }
-  }
-  if (running.size > 0) {
-    const names = [...running].map(([p, pids]) => `${p.name} (pid ${pids.join(", ")})`).join(", ");
-    out(yellow(`claude is running in ${names}.`));
-    if (!force && !ctx.dryRun) {
-      out(dim("Close those sessions and run this again, or pass --force to go ahead anyway."));
-      return 1;
-    }
-  }
+  const stopping = running.filter((r) => !r.self);
+  if (stopping.length > 0) out(yellow(`claude will be stopped in ${describeRunning(stopping)} before anything moves.`));
   if (ctx.dryRun) {
     out(dim("--dry-run: nothing was changed."));
     return 0;
@@ -90,6 +81,7 @@ async function run(args: Parsed, mode: "sync" | "detach"): Promise<number> {
     out(yellow("Cancelled. Nothing was changed."));
     return 1;
   }
+  await stopSessions(running);
 
   out();
   await withLock(storeLockPath(ctx.store), async () => {
@@ -118,21 +110,36 @@ async function run(args: Parsed, mode: "sync" | "detach"): Promise<number> {
   return 0;
 }
 
+function describeRunning(running: Running[]): string {
+  return running.map((r) => `${r.profile.name} (pid ${r.pid}${r.cwd === undefined ? "" : `, ${tilde(r.cwd)}`})`).join(", ");
+}
+
 /**
- * Items another profile would seed into the store while the seed profile, left
- * out of this run, still holds its own copy. Those would win over the seed's.
+ * Stop the claude sessions in the profiles this run changes, and say so. The
+ * one ctx runs from cannot be stopped without stopping ctx, so it keeps going.
  */
-async function seedOverrides(
-  all: Profile[],
-  wanted: Profile[],
-  plans: Map<Profile, Plan>,
-  ctx: Ctx,
-): Promise<string[]> {
-  const seed = all.find((p) => p.name === ctx.config.seed);
-  if (seed === undefined || wanted.includes(seed)) return [];
+async function stopSessions(running: Running[]): Promise<void> {
+  const others = running.filter((r) => !r.self);
+  for (const r of running.filter((r) => r.self)) {
+    out(yellow(`warning: claude in ${r.profile.name} (pid ${r.pid}) is the session running ctx, so it keeps running. Restart it once this finishes.`));
+  }
+  if (others.length === 0) return;
+  out(yellow(`warning: stopping claude in ${describeRunning(others)}.`));
+  const left = await stopRunning(others);
+  out(dim("  Their transcripts are saved. `claude --continue` in that folder picks a session up again."));
+  if (left.length > 0) out(yellow(`warning: ${describeRunning(left)} would not stop. Carrying on anyway.`));
+}
+
+/** Items the profiles in this run would seed while the seed still holds its own copy. */
+async function seedClashes(seed: Profile, wanted: Profile[], ctx: Ctx): Promise<string[]> {
   const held = await heldBySeed(seed, ctx.store, ctx.config, ctx.only);
-  const seeded = [...plans.values()].flatMap((p) => p.effective.filter((s) => s.kind === "seed").map((s) => s.item.name));
-  return [...new Set(seeded.filter((name) => held.has(name)))];
+  const pending = new Set<string>();
+  const clash = new Set<string>();
+  for (const p of wanted) {
+    const plan = await planSync(p, ctx.store, ctx.config, ctx.only, pending);
+    for (const s of plan.effective) if (s.kind === "seed" && held.has(s.item.name)) clash.add(s.item.name);
+  }
+  return [...clash];
 }
 
 /**
@@ -163,14 +170,18 @@ async function foldRegistry(profile: Profile, ctx: Ctx): Promise<void> {
   }
 }
 
-function printPlan(plans: Map<Profile, Plan>, running: Map<Profile, number[]>, mode: string, ctx: Ctx): void {
+function printPlan(plans: Map<Profile, Plan>, running: Running[], mode: string, ctx: Ctx): void {
   out();
   out(`${bold(mode === "sync" ? "Plan" : "Detach plan")}  ${dim("store")} ${cyan(tilde(ctx.store))}`);
 
   for (const [profile, plan] of plans) {
     out();
-    const live = running.get(profile);
-    const note = live === undefined ? "" : `  ${yellow(`claude running (${live.length})`)}`;
+    const live = running.filter((r) => r.profile === profile);
+    const stopped = live.filter((r) => !r.self).length;
+    const note =
+      live.length === 0
+        ? ""
+        : `  ${yellow(stopped > 0 ? `claude running (${stopped}), will be stopped` : "claude running here, left alone")}`;
     out(`  ${bold(profile.name)} ${dim(tilde(profile.dir))}${note}`);
     if (plan.effective.length === 0) {
       out(dim("    nothing to do"));
@@ -204,11 +215,11 @@ function verb(kind: string): string {
   }
 }
 
-function serialize(plans: Map<Profile, Plan>, running: Map<Profile, number[]>) {
+function serialize(plans: Map<Profile, Plan>, running: Running[]) {
   return [...plans].map(([profile, plan]) => ({
     profile: profile.name,
     dir: profile.dir,
-    running: running.get(profile) ?? [],
+    running: running.filter((r) => r.profile === profile).map((r) => r.pid),
     steps: plan.effective.map((s) => ({
       item: s.item.name,
       state: s.state,

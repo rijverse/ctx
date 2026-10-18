@@ -168,17 +168,31 @@ describe("ctx CLI", () => {
     await writeFile(join(fh.home, dir, "sessions", `${pid}.json`), JSON.stringify({ procStart }));
   }
 
-  it("will not move a profile's data while claude is running in it", async () => {
+  it("stops claude in a profile before moving its data, and says so", async () => {
     await ctx("init", "-y");
+    const { spawn } = await import("node:child_process");
+    const sleeper = spawn("sleep", ["60"]);
+    const exited = new Promise((r) => sleeper.once("exit", r));
+    await liveSession(".claude-me", sleeper.pid!);
+
+    const { stdout, code } = await ctx("sync", "--all", "-y");
+    expect(code).toBe(0);
+    expect(stdout).toContain(`warning: stopping claude in me (pid ${sleeper.pid}`);
+    await exited;
+    expect(sleeper.signalCode).toBe("SIGTERM");
+    expect((await lstat(join(fh.home, ".claude-me", "projects"))).isSymbolicLink()).toBe(true);
+  });
+
+  it("never stops the session ctx itself runs from", async () => {
+    await ctx("init", "-y");
+    // The test runner is an ancestor of the ctx it starts, like a claude
+    // session is of a ctx run from its shell.
     await liveSession(".claude-me");
 
-    const refused = await ctx("sync", "--all", "-y");
-    expect(refused.code).toBe(1);
-    expect(refused.stdout).toContain("claude is running in me");
-    expect((await lstat(join(fh.home, ".claude", "projects"))).isSymbolicLink()).toBe(false);
-
-    const forced = await ctx("sync", "--all", "-y", "--force");
-    expect(forced.code).toBe(0);
+    const { stdout, code } = await ctx("sync", "--all", "-y");
+    expect(code).toBe(0);
+    expect(stdout).toContain("is the session running ctx, so it keeps running");
+    expect(stdout).not.toContain("warning: stopping");
     expect((await lstat(join(fh.home, ".claude-me", "projects"))).isSymbolicLink()).toBe(true);
   });
 
@@ -329,19 +343,18 @@ describe("ctx CLI", () => {
     expect(await readFile(join(fh.home, ".ctx-store", "settings.json"), "utf8")).toBe('{"who":"me"}');
   });
 
-  it("will not let another profile seed what the seed profile still holds", async () => {
+  it("syncs an unsynced seed first rather than letting another profile win over it", async () => {
     await fh.profile("default", { "settings.json": '{"who":"default"}' });
     await fh.profile("me", { "settings.json": '{"who":"me"}' });
     await ctx("init", "-y");
 
-    const refused = await ctx("sync", "me", "-y");
-    expect(refused.code).toBe(1);
-    expect(refused.stdout).toContain("default seeds the store");
-    expect(await readFile(join(fh.home, ".claude-me", "settings.json"), "utf8")).toBe('{"who":"me"}');
-
-    await ctx("sync", "default", "-y");
-    expect((await ctx("sync", "me", "-y")).code).toBe(0);
+    const run = await ctx("sync", "me", "-y");
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain("default seeds the store and is not synced yet, so it is synced first");
     expect(await readFile(join(fh.home, ".ctx-store", "settings.json"), "utf8")).toBe('{"who":"default"}');
+    for (const d of [".claude", ".claude-me"]) {
+      expect((await lstat(join(fh.home, d, "settings.json"))).isSymbolicLink()).toBe(true);
+    }
   });
 
 

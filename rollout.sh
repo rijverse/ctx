@@ -14,8 +14,9 @@
 # and on a name collision the store wins, so the seed decides whose
 # settings.json, CLAUDE.md and plugins everyone ends up with.
 #
-# Nothing changes without a yes at a prompt. Run it from a plain terminal with
-# every claude session closed.
+# Nothing changes without a yes at a prompt. Claude running in any of the
+# profiles is stopped before the backup, with a warning, except the session
+# this script runs under.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,6 +73,33 @@ profiles() {
   ' "$here" "$add"
 }
 
+# Stop claude in every managed profile, the way ctx sync does: graceful first,
+# never the session this script itself runs under, and say what was stopped.
+stop_sessions() {
+  node --input-type=module -e '
+    const [dir, extra] = process.argv.slice(1);
+    const { defaultConfig, loadConfig } = await import(`${dir}/dist/core/config.js`);
+    const { expand, storePath, tilde } = await import(`${dir}/dist/core/paths.js`);
+    const { listProfiles } = await import(`${dir}/dist/core/profiles.js`);
+    const { findRunning, stopRunning } = await import(`${dir}/dist/core/live.js`);
+    const store = storePath();
+    const config = (await loadConfig(store)) ?? defaultConfig();
+    for (const d of extra ? extra.split(",") : []) config.profiles.push(expand(d.trim()));
+    const running = await findRunning(await listProfiles(config, store));
+    const label = (rs) => rs.map((r) => `${r.profile.name} (pid ${r.pid}${r.cwd ? `, ${tilde(r.cwd)}` : ""})`).join(", ");
+    for (const r of running.filter((r) => r.self)) {
+      console.log(`warning: claude in ${r.profile.name} (pid ${r.pid}) runs this script, so it keeps running. Restart it once this finishes.`);
+    }
+    const others = running.filter((r) => !r.self);
+    if (others.length > 0) {
+      console.log(`warning: stopping claude in ${label(others)}.`);
+      const left = await stopRunning(others);
+      console.log("  Their transcripts are saved. `claude --continue` in that folder picks a session up again.");
+      if (left.length > 0) console.log(`warning: ${label(left)} would not stop. Carrying on anyway.`);
+    }
+  ' "$here" "$add"
+}
+
 # Steps a sync of one profile would take, empty when there is no such profile.
 pending() {
   ctx sync "$1" --json 2>/dev/null |
@@ -79,7 +107,7 @@ pending() {
 }
 
 say "Preflight"
-[[ -z ${CLAUDECODE:-} ]] || stop "This shell was started by claude. Run the script from a plain terminal."
+[[ -z ${CLAUDECODE:-} ]] || echo "warning: this shell was started by claude. That session keeps running, so restart it once this finishes."
 command -v node >/dev/null || stop "node is not on PATH."
 major="$(node -p 'process.versions.node.split(".")[0]')"
 ((major >= 20)) || stop "ctx needs Node 20 or newer, this is $(node --version)."
@@ -123,11 +151,12 @@ done <<<"$list"
 Starting fresh needs no script: \`ctx init\`, then \`ctx run default\` and \`ctx run <name>\` once per account.
 If yours live somewhere unusual, point at them with --add DIR,DIR."
 for i in "${!names[@]}"; do printf '  %-14s %s\n' "${names[$i]}" "$(short "${dirs[$i]}")"; done
+# The backup should not catch a session mid-write, so claude is stopped first.
 if [[ -n $running ]]; then
-  printf 'claude is still running in:\n%s' "$running"
-  stop "Exit those sessions and run this again."
+  stop_sessions
+else
+  echo "ok, no claude sessions running"
 fi
-echo "ok, no claude sessions running"
 
 has() {
   local n

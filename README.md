@@ -70,8 +70,9 @@ and run it in place with `node dist/cli.js <command>` if you skip the link.
 
 ## Quick start
 
-Close every running `claude` session first. `sync` refuses a profile while
-one is open in it.
+If `claude` is running in an account `sync` is about to change, it is stopped
+first, gracefully, with a warning saying which sessions and how to pick them up
+again. The session you run `ctx` from is never stopped.
 
 ```sh
 ctx init            # create the store, with ~/.claude as its seed
@@ -235,17 +236,17 @@ save. Pulling stays the job of `ctx run`.
 |---|---|
 | `ctx init [--from <profile>] [--add <dir>,...] [--as <name>]` | Create the store and pick its seed. |
 | `ctx add <dir>... [--as <name>]` | Manage a profile outside `~/.claude-*`, or rename one. |
-| `ctx sync [profile...] [--all] [--force]` | Move a profile's data into the store and symlink it back. |
+| `ctx sync [profile...] [--all]` | Move a profile's data into the store and symlink it back. |
 | `ctx status` (aliases `ls`, `st`) | Per-profile, per-item state in one grid, plus Claude dirs not yet managed. |
 | `ctx run <profile> [-- <args>]` | Launch `claude` with the shared registry in place. |
-| `ctx detach [profile...] [--all] [--force]` | Give a profile back its own independent copies. |
+| `ctx detach [profile...] [--all]` | Give a profile back its own independent copies. |
 | `ctx doctor [profile...]` (alias `repair`) | Find and repair broken or misdirected links, and flag real copies where a link should be. |
 | `ctx registry <show\|pull\|push\|diff>` | Drive the `.claude.json` split by hand. |
 | `ctx hooks <status\|install\|uninstall>` | Wire sessions you did not start with `ctx run` into the store. |
 | `ctx which [profile]` | Print the `CLAUDE_CONFIG_DIR` export for a profile. |
 
 Flags: `-n/--dry-run`, `-y/--yes`, `-v/--verbose`, `--json`, `--only a,b`,
-`--store <path>`, `--force`.
+`--store <path>`.
 
 ## Safety
 
@@ -255,10 +256,13 @@ The tool is built so an interrupted run is always safe to re-run.
   `<store>/.backups/<profile>/<timestamp>/`. The only things `ctx` deletes
   outright are a symlink it is about to replace and directories with no files
   left in them. A file that turns up mid-merge goes to the backup.
-- `sync` and `detach` refuse a profile while `claude` is running in it, going by
-  the `sessions/<pid>.json` files Claude keeps. Close those sessions, or pass
-  `--force` if you know better. Session files left by a crashed `claude` are
-  ignored.
+- `sync` and `detach` never stop to make you close sessions. `claude` running
+  in a profile they are about to change is stopped first, going by the
+  `sessions/<pid>.json` files Claude keeps: SIGTERM so the transcript is
+  written out, then SIGKILL after five seconds. The plan says which sessions
+  that will be, the run warns as it does it, and `--dry-run` stops nothing. The
+  session `ctx` itself runs from is left alone, with a warning to restart it.
+  An unsynced seed is not a blocker either: it is synced first.
 - Links are swapped with a rename, so a path is never briefly missing for a
   running session to recreate as a real directory.
 - Everything that changes the store runs under one lock, so two `ctx`

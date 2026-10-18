@@ -66,3 +66,47 @@ export async function confirm(question: string): Promise<boolean> {
   });
   return /^\s*y(es)?\s*$/i.test(answer);
 }
+
+/**
+ * A status line that rewrites itself in place, for work that takes long enough
+ * to look hung. Only on a terminal: piped or redirected output stays clean, so
+ * --json and scripts are unaffected.
+ */
+export function progress(label: string): { update(detail?: string): void; done(final?: string): void } {
+  const live = process.stdout.isTTY === true;
+  const started = Date.now();
+  let width = 0;
+  let last = 0;
+
+  const paint = (text: string) => {
+    try {
+      process.stdout.write("\r" + text + " ".repeat(Math.max(0, width - text.length)));
+      width = text.length;
+    } catch {
+      /* closed pipe */
+    }
+  };
+
+  return {
+    update(detail) {
+      if (!live) return;
+      // Repainting every file would cost more than the work itself.
+      const now = Date.now();
+      if (now - last < 80) return;
+      last = now;
+      const secs = Math.round((now - started) / 1000);
+      paint(`  ${label}${detail === undefined ? "" : ` ${detail}`}${secs >= 2 ? dim(` ${secs}s`) : ""}`);
+    },
+    done(final) {
+      if (live && width > 0) paint("");
+      if (live) {
+        try {
+          process.stdout.write("\r");
+        } catch {
+          /* closed pipe */
+        }
+      }
+      if (final !== undefined) out(final);
+    },
+  };
+}

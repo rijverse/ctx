@@ -1,47 +1,45 @@
 #!/usr/bin/env bash
-# Move this machine's Claude profiles onto a ctx store, one checked step at a
-# time: back up, create the store, seed it, try one more profile, then the rest.
+# Move this machine's Claude profiles onto a ctx store: back up, create the
+# store, fold every profile into it, share the registry, install the hook.
 #
-#   ./rollout.sh [--add DIR,DIR] [--seed PROFILE] [trial-profile]
+#   ./rollout.sh [--add DIR,DIR] [--seed PROFILE] [-n] [-y]
 #
 #   --add    profile dirs outside ~/.claude and ~/.claude-*, wherever
 #            CLAUDE_CONFIG_DIR points for them
 #   --seed   the profile the store starts from. Defaults to ~/.claude, and is
 #            asked for when there is none.
-#   trial    one more profile to try before the rest. Defaults to "guest".
+#   -n       print the plan and stop
+#   -y       do not ask at all
 #
-# The seed always goes first. The first profile synced becomes the store's copy,
-# and on a name collision the store wins, so the seed decides whose
-# settings.json, CLAUDE.md and plugins everyone ends up with.
+# It shows the whole plan, asks once, then runs to the end. The seed goes
+# first: the first profile synced becomes the store's copy, and on a name
+# collision the store wins, so the seed decides whose settings.json, CLAUDE.md
+# and plugins everyone ends up with.
 #
-# Nothing changes without a yes at a prompt. Claude running in any of the
-# profiles is stopped before the backup, with a warning, except the session
-# this script runs under.
+# Claude running in any of the profiles is stopped before the backup, except
+# the session this script runs under.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 store="${CTX_STORE:-$HOME/.ctx-store}"
 add=""
 seed=""
-trial="guest"
+dry=0
+yes=0
 while (($# > 0)); do
   case $1 in
     --add) add="${2:?--add needs a directory}"; shift 2 ;;
     --seed) seed="${2:?--seed needs a profile name}"; shift 2 ;;
-    -h | --help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    -*) printf 'unknown option %s\n' "$1" >&2; exit 2 ;;
-    *) trial="$1"; shift ;;
+    -n | --dry-run) dry=1; shift ;;
+    -y | --yes) yes=1; shift ;;
+    -h | --help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) printf 'unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 
 ctx() { node "$here/dist/cli.js" "$@"; }
-say() { printf '\n== %s\n' "$*"; }
+say() { printf '\n%s\n' "$*"; }
 short() { printf '%s' "${1/#"$HOME"/'~'}"; }
-ask() {
-  local a
-  read -r -p "$* [y/N] " a || true
-  [[ $a =~ ^[Yy]([Ee][Ss])?$ ]]
-}
 stop() {
   printf '%s\n' "$*" >&2
   exit 1
@@ -100,13 +98,28 @@ stop_sessions() {
   ' "$here" "$add"
 }
 
-# Steps a sync of one profile would take, empty when there is no such profile.
-pending() {
-  ctx sync "$1" --json 2>/dev/null |
-    node -e 'console.log(JSON.parse(require("fs").readFileSync(0, "utf8")).plans[0].steps.length)' || true
+# tar says nothing for minutes on a big home, so poll what it has written
+# against what the sources add up to.
+backup_with_progress() {
+  local out=$1
+  shift
+  local total
+  total="$(du -sbc "$@" 2>/dev/null | tail -1 | cut -f1)"
+  (umask 077 && tar czPf "$out" "$@") &
+  local pid=$!
+  if [[ -t 1 ]]; then
+    while kill -0 $pid 2>/dev/null; do
+      local now
+      now="$(stat -c %s "$out" 2>/dev/null || echo 0)"
+      printf '\r  writing %s of about %s (compressed)   ' "$(numfmt --to=iec "$now" 2>/dev/null || echo "$now")" \
+        "$(numfmt --to=iec "$total" 2>/dev/null || echo "$total")"
+      sleep 1
+    done
+    printf '\r%*s\r' 60 ''
+  fi
+  wait $pid
 }
 
-say "Preflight"
 [[ -z ${CLAUDECODE:-} ]] || echo "warning: this shell was started by claude. That session keeps running, so restart it once this finishes."
 command -v node >/dev/null || stop "node is not on PATH."
 major="$(node -p 'process.versions.node.split(".")[0]')"
@@ -117,46 +130,23 @@ if [[ ! -f $here/dist/cli.js ]]; then
 fi
 
 list="$(profiles)" || stop "Stopped before changing anything."
-
-# A Claude dir under another name, ~/.my-claude say, is offered, not taken: a
-# backup copy of a profile looks the same and should stay out of the store.
-found_names=()
-found_dirs=()
-found_why=()
-while IFS=$'\t' read -r kind name dir why; do
-  [[ $kind == C ]] || continue
-  found_names+=("$name")
-  found_dirs+=("$dir")
-  found_why+=("$why")
-done <<<"$list"
-if ((${#found_names[@]} > 0)); then
-  echo "Found Claude dirs ctx is not managing yet:"
-  for i in "${!found_names[@]}"; do
-    printf '  %-14s %s  (%s)\n' "${found_names[$i]}" "$(short "${found_dirs[$i]}")" "${found_why[$i]}"
-    if ask "  Manage it as \"${found_names[$i]}\"?"; then add="${add:+$add,}${found_dirs[$i]}"; fi
-  done
-  list="$(profiles)" || stop "Stopped before changing anything."
-fi
-
 names=()
 dirs=()
-running=""
-while IFS=$'\t' read -r kind name dir pids; do
-  [[ $kind == P ]] || continue
-  names+=("$name")
-  dirs+=("$dir")
-  [[ -z $pids ]] || running+="  $name (pid ${pids// /, })"$'\n'
+running=0
+found=""
+while IFS=$'\t' read -r kind name dir rest; do
+  case $kind in
+    P)
+      names+=("$name")
+      dirs+=("$dir")
+      [[ -z $rest ]] || running=$((running + 1))
+      ;;
+    C) found+="  $name  $(short "$dir")  ($rest)"$'\n' ;;
+  esac
 done <<<"$list"
 ((${#names[@]} > 0)) || stop "No Claude profiles found, so there is nothing to move over.
 Starting fresh needs no script: \`ctx init\`, then \`ctx run default\` and \`ctx run <name>\` once per account.
 If yours live somewhere unusual, point at them with --add DIR,DIR."
-for i in "${!names[@]}"; do printf '  %-14s %s\n' "${names[$i]}" "$(short "${dirs[$i]}")"; done
-# The backup should not catch a session mid-write, so claude is stopped first.
-if [[ -n $running ]]; then
-  stop_sessions
-else
-  echo "ok, no claude sessions running"
-fi
 
 has() {
   local n
@@ -164,34 +154,19 @@ has() {
   return 1
 }
 
-say "Backup"
-items=("${dirs[@]}")
-[[ -f $HOME/.claude.json ]] && items+=("$HOME/.claude.json")
-backup="$HOME/claude-backup-$(date +%Y%m%d-%H%M%S).tgz"
-for item in "${items[@]}"; do printf '  %s\n' "$(short "$item")"; done
-echo "goes to $(short "$backup")"
-echo "It holds your login tokens, so it is written 0600. Keep it private."
-ask "Write the backup?" || stop "Stopped. Nothing was changed."
-# Absolute paths, so each profile restores to where it was, wherever it lives.
-(umask 077 && tar czPf "$backup" "${items[@]}")
-tar tzPf "$backup" >/dev/null || stop "The backup does not read back. Stopping before anything else."
-echo "ok, $(du -h "$backup" | cut -f1)"
-
-say "Store"
+fresh=0
 if [[ -f $store/ctx.json ]]; then
-  echo "already set up at $(short "$store")"
-  if [[ -n $add ]]; then
-    IFS=, read -r -a extra <<<"$add"
-    ctx add "${extra[@]}"
-  fi
   seed="$(node -p 'require(process.argv[1]).seed ?? ""' "$store/ctx.json")"
   [[ -n $seed ]] || seed=default
 else
+  fresh=1
   if [[ -z $seed ]]; then
     if has default; then
       seed=default
     elif ((${#names[@]} == 1)); then
       seed="${names[0]}"
+    elif ((yes == 1 || dry == 1)); then
+      stop "There is no ~/.claude, so name the profile the store starts from: --seed <${names[0]}|...>"
     else
       echo "There is no ~/.claude, so the store needs another profile to start from."
       echo "Its settings.json, CLAUDE.md and plugins become everyone's."
@@ -199,76 +174,72 @@ else
     fi
   fi
   has "$seed" || stop "No profile named \"$seed\". Found: ${names[*]}"
+fi
+
+items=("${dirs[@]}")
+[[ -f $HOME/.claude.json ]] && items+=("$HOME/.claude.json")
+backup="$HOME/claude-backup-$(date +%Y%m%d-%H%M%S).tgz"
+
+say "This will set up one shared store for $(short "$store")"
+printf '\n  %-14s %s\n' "profile" "directory"
+for i in "${!names[@]}"; do
+  printf '  %-14s %s%s\n' "${names[$i]}" "$(short "${dirs[$i]}")" \
+    "$([[ ${names[$i]} == "$seed" ]] && printf '   seeds the store' || true)"
+done
+[[ -z $found ]] || printf '\nClaude dirs ctx is not managing (pass --add to include one):\n%s' "$found"
+say "Steps, in order, no further questions:"
+cat <<TXT
+  1  back up every profile to $(short "$backup")
+  2  $( ((fresh)) && echo "create the store, seeded from $seed" || echo "use the store that is already at $(short "$store")")
+  3  fold all ${#names[@]} profile(s) into it and link them, $seed first
+  4  share the project trust and MCP servers into every profile
+  5  install the SessionEnd hook, so sessions you start by hand fold back too
+TXT
+((running == 0)) || echo "
+  claude is running in $running profile(s) and will be stopped first, except this one"
+echo
+
+if ((dry)); then
+  echo "--dry-run: nothing was changed."
+  exit 0
+fi
+if ((yes == 0)); then
+  read -r -p "Go ahead? [y/N] " a || true
+  [[ ${a:-} =~ ^[Yy]([Ee][Ss])?$ ]] || stop "Nothing was changed."
+fi
+
+((running == 0)) || stop_sessions
+
+say "1/5  Backup"
+backup_with_progress "$backup" "${items[@]}"
+tar tzPf "$backup" >/dev/null || stop "The backup does not read back. Stopping before anything else."
+echo "  $(short "$backup")  $(du -h "$backup" | cut -f1)"
+
+say "2/5  Store"
+if ((fresh)); then
   init=(--from "$seed")
   [[ -z $add ]] || init+=(--add "$add")
-  ctx init --dry-run "${init[@]}"
-  ask "Create the store?" || stop "Stopped. Only the backup was written."
-  ctx init -y "${init[@]}"
-fi
-
-say "Seed the store from $seed"
-echo "Its settings.json, CLAUDE.md, skills, plugins and history become the shared"
-echo "copies. A profile synced later keeps its own colliding files in the backup."
-n="$(pending "$seed")"
-if [[ -z $n ]]; then
-  stop "The seed profile \"$seed\" is gone. Set \"seed\" in $(short "$store/ctx.json") to one that exists."
-elif ((n == 0)); then
-  echo "$seed is already linked"
+  ctx init -y "${init[@]}" >/dev/null
+  echo "  created $(short "$store"), seeded from $seed"
 else
-  ctx sync "$seed" --dry-run
-  ask "Sync $seed now?" || stop "Stopped. Only the backup and the empty store were written."
-  ctx sync "$seed" -y
-  ctx registry pull "$seed"
+  [[ -z $add ]] || ctx add "${add//,/ }"
+  echo "  using $(short "$store"), seeded from $seed"
 fi
 
-say "Trial run on $trial"
-n="$(pending "$trial")"
-if [[ $trial == "$seed" ]]; then
-  echo "$trial is the seed, so there is nothing more to try"
-elif [[ -z $n ]]; then
-  echo "no profile named $trial, skipping the trial"
-elif ((n == 0)); then
-  echo "$trial is already linked"
-else
-  ctx sync "$trial" --dry-run
-  if ask "Sync $trial now?"; then
-    ctx sync "$trial" -y
-    ctx registry pull "$trial"
-    ctx status
-    echo
-    echo "Try it from another terminal before going on:"
-    echo "  node $here/dist/cli.js run $trial"
-    ask "Did $trial work? Go on with every profile?" ||
-      stop "Stopped after $trial. \`node $here/dist/cli.js detach $trial\` undoes it."
-  fi
-fi
-
-say "Every profile"
-ctx sync --all --dry-run
-ask "Sync every profile?" || stop "Stopped. Profiles already synced stay that way. \`ctx detach <profile>\` undoes one."
+say "3/5  Folding every profile in"
 ctx sync --all -y
 
-say "Registry"
-echo "Write the shared trust decisions and MCP servers into every profile now,"
-echo "so plain \`claude\` sees them too, not only \`ctx run\`. Logins are not touched."
-if ask "Pull the registry into every profile?"; then
-  for name in "${names[@]}"; do ctx registry pull "$name"; done
-fi
+say "4/5  Sharing the registry"
+for name in "${names[@]}"; do ctx registry pull "$name" | sed 's/^/  /'; done
+
+say "5/5  SessionEnd hook"
+ctx hooks install -y | sed 's/^/  /'
+ctx sync --all -y --only settings.json >/dev/null
 
 say "Check"
 ctx doctor || echo "doctor found something, see above"
-ctx status
-
-say "SessionEnd hook (optional)"
-echo "Only needed if you start claude without \`ctx run\`. It folds those"
-echo "sessions' .claude.json changes into the store when they end."
-if ask "Install it?"; then
-  ctx hooks install -y
-  # The hook lives in the store's settings.json, so every profile has to link it.
-  ctx sync --all -y --only settings.json
-fi
 
 say "Done"
-echo "backup:  $(short "$backup")"
-echo "launch:  node $here/dist/cli.js run <profile>    (or \`ctx run\` after npm link)"
-echo "undo:    node $here/dist/cli.js detach <profile>"
+echo "  backup:  $(short "$backup")"
+echo "  launch:  node $here/dist/cli.js run <profile>    (or \`ctx run\` after npm link)"
+echo "  undo:    node $here/dist/cli.js detach --all"

@@ -11,7 +11,7 @@ import {
   removeEmptyDirs,
   replaceSymlink,
 } from "../util/fsx.js";
-import { dim, fail, out, yellow } from "../util/ui.js";
+import { dim, fail, out, pad, progress, yellow } from "../util/ui.js";
 import type { Config } from "./config.js";
 import { isGuarded } from "./inventory.js";
 import { backupRoot, tilde } from "./paths.js";
@@ -48,6 +48,10 @@ export async function apply(
       fail(`refusing to touch guarded entry ${step.item.name}`);
     }
     const backupDir = join(backupRoot(store, step.profile), stamp);
+    const bar = progress(`${pad(step.kind, 8)} ${step.profile}/${step.item.name}`);
+    let files = 0;
+    const tick = () => bar.update(`${++files} files`);
+    bar.update();
 
     switch (step.kind) {
       case "seed":
@@ -63,7 +67,7 @@ export async function apply(
           break;
         }
         const combine = step.item.merge === "lines" ? mergeJsonl : undefined;
-        const { kept, merged } = await mergeTree(step.from, step.to, combine);
+        const { kept, merged } = await mergeTree(step.from, step.to, combine, tick);
         result.collisions.push(...kept);
         result.merged.push(...merged);
         // What is left should be empty directories. Anything else, a collision
@@ -92,8 +96,9 @@ export async function apply(
         continue;
     }
 
+    bar.done();
     result.done++;
-    if (opts.verbose === true) out(dim(`  ${step.kind} ${tilde(step.from)}`));
+    if (opts.verbose === true) out(dim(`  ${step.kind} ${tilde(step.from)}${files > 0 ? ` (${files} files)` : ""}`));
   }
 
   return result;

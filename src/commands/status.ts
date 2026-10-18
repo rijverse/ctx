@@ -10,7 +10,7 @@ import { describe } from "../core/registry.js";
 import { readSlice } from "../core/session.js";
 import type { Parsed } from "../util/args.js";
 import { dirSize, exists } from "../util/fsx.js";
-import { bold, cyan, dim, green, out, pad, red, yellow } from "../util/ui.js";
+import { bold, cyan, dim, green, out, pad, progress, red, yellow } from "../util/ui.js";
 import { globals } from "./_context.js";
 
 export async function status(args: Parsed): Promise<number> {
@@ -64,7 +64,10 @@ export async function status(args: Parsed): Promise<number> {
   }
 
   const slice = await readSlice(g.store);
-  const bytes = await dirSize(g.store);
+  const scan = progress("measuring the store");
+  let seen = 0;
+  const bytes = await dirSize(g.store, () => scan.update(`${++seen} files`));
+  scan.done();
 
   out();
   out(`${bold("Store")}  ${cyan(tilde(g.store))}  ${dim(human(bytes))}`);

@@ -214,6 +214,7 @@ export async function mergeTree(
   from: string,
   to: string,
   combine?: (src: string, dst: string) => Promise<boolean>,
+  tick?: () => void,
 ): Promise<{ kept: string[]; merged: string[] }> {
   const kept: string[] = [];
   const merged: string[] = [];
@@ -223,7 +224,7 @@ export async function mergeTree(
     const dst = join(to, entry.name);
     if (entry.isDirectory()) {
       if (await isDir(dst)) {
-        const inner = await mergeTree(src, dst, combine);
+        const inner = await mergeTree(src, dst, combine, tick);
         kept.push(...inner.kept);
         merged.push(...inner.merged);
       } else if (await exists(dst)) {
@@ -233,6 +234,7 @@ export async function mergeTree(
       }
       continue;
     }
+    tick?.();
     if (!(await exists(dst))) {
       await move(src, dst);
     } else if (combine !== undefined && entry.isFile() && (await lstat(dst)).isFile() && (await combine(src, dst))) {
@@ -244,7 +246,7 @@ export async function mergeTree(
   return { kept, merged };
 }
 
-export async function dirSize(p: string): Promise<number> {
+export async function dirSize(p: string, tick?: () => void): Promise<number> {
   let total = 0;
   const stack = [p];
   while (stack.length) {
@@ -261,6 +263,7 @@ export async function dirSize(p: string): Promise<number> {
       if (e.isDirectory()) {
         stack.push(full);
       } else {
+        tick?.();
         try {
           total += (await lstat(full)).size;
         } catch {

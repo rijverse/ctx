@@ -107,11 +107,13 @@ on purpose, holding its own copies, is left alone.
 
 ### Moving an existing machine over
 
-To move an existing machine over with a backup first and one trial profile
-before the rest, use the script in this repo:
+To move an existing machine over, use the script in this repo. It shows the
+whole plan, asks once, then runs to the end: back up, create the store, fold
+every profile in, share the registry, install the hook. `-n` prints the plan
+and stops.
 
 ```sh
-./rollout.sh [--add DIR,DIR] [--seed PROFILE] [trial-profile]
+./rollout.sh [--add DIR,DIR] [--seed PROFILE] [-n] [-y]
 ```
 
 ### The seed

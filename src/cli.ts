@@ -8,6 +8,7 @@ import { registry } from "./commands/registry.js";
 import { runProfile, which } from "./commands/run.js";
 import { status } from "./commands/status.js";
 import { detach, sync } from "./commands/sync.js";
+import { planUsage } from "./commands/usage.js";
 import { parseArgs, type Parsed } from "./util/args.js";
 import { bold, CtxError, dim, err, out, red, silenceBrokenPipe } from "./util/ui.js";
 
@@ -24,6 +25,7 @@ const COMMANDS: Record<string, Handler> = {
   detach,
   doctor,
   run: runProfile,
+  usage: planUsage,
   which,
   registry,
   hooks,
@@ -47,6 +49,7 @@ function usage(): void {
   out(`  sync [profile...] [--all]       move a profile's data into the store and symlink it back`);
   out(`  status                          what every profile shares, and what it does not (ls, st)`);
   out(`  run <profile> [-- args]         launch claude for a profile with the shared registry`);
+  out(`  usage [profile...]              how much of each account's plan limits is left`);
   out(`  detach [profile...] [--all]     hand a profile back its own independent copies`);
   out(`  doctor [profile...]             repair broken links, flag copies that should be links (repair)`);
   out(`  registry <show|pull|push|diff> [profile]`);

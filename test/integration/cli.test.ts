@@ -153,6 +153,26 @@ describe("ctx CLI", () => {
     expect(slice.data.projects["/new"].hasTrustDialogAccepted).toBe(true);
   });
 
+  it("reports usage per account before there is a store, without asking for a login it lacks", async () => {
+    await fh.profile("stale", {
+      ".credentials.json": JSON.stringify({ claudeAiOauth: { accessToken: "t", expiresAt: 1, subscriptionType: "pro" } }),
+    });
+
+    const { stdout, code } = await ctx("usage", "--json");
+    expect(code).toBe(0);
+    const byName = Object.fromEntries(
+      JSON.parse(stdout).profiles.map((p: { name: string; state: string }) => [p.name, p]),
+    );
+    expect(byName.default.state).toBe("none");
+    expect(byName.me).toMatchObject({ state: "none", account: "me@x.test" });
+    expect(byName.stale).toMatchObject({ state: "expired", plan: "pro" });
+
+    const text = await ctx("usage", "stale");
+    expect(text.stdout).toContain("login expired");
+    expect(text.stdout).not.toContain("me@x.test");
+    expect((await ctx("usage", "nope")).stdout).toContain("unknown profile");
+  });
+
   it("survives a closed pipe", async () => {
     await ctx("init", "-y");
     const { stdout } = await run("/bin/sh", ["-c", `node ${CLI} status | head -2`], {

@@ -257,6 +257,7 @@ save. Pulling stays the job of `ctx run`.
 | `ctx sync [profile...] [--all]` | Move a profile's data into the store and symlink it back. |
 | `ctx status` (aliases `ls`, `st`) | Per-profile, per-item state in one grid, plus Claude dirs not yet managed. |
 | `ctx run <profile> [-- <args>]` | Launch `claude` with the shared registry in place. |
+| `ctx usage [profile...]` | How much of each account's plan limits is left, and when each resets. |
 | `ctx detach [profile...] [--all]` | Give a profile back its own independent copies. |
 | `ctx doctor [profile...]` (alias `repair`) | Find and repair broken or misdirected links, and flag real copies where a link should be. |
 | `ctx registry <show\|pull\|push\|diff>` | Drive the `.claude.json` split by hand. |
@@ -265,6 +266,29 @@ save. Pulling stays the job of `ctx run`.
 
 Flags: `-n/--dry-run`, `-y/--yes`, `-v/--verbose`, `--json`, `--only a,b`,
 `--store <path>`.
+
+### Which account has room left
+
+```sh
+ctx usage
+```
+
+```
+  profile  account          plan  session         week
+  default  me@example.com   max    94%  3h 45m      0%  1d 15h
+  work     me@work.example  team   18%  5m         83%  4d 11h    Fable 100%
+  spare    -                -     not logged in
+```
+
+The same numbers Claude's `/usage` shows, for every account at once: the
+percent left in the five hour session and the week, any narrower weekly cap
+for one model, and the time until each resets. Anthropic reports percentages,
+not tokens. It works before `ctx init`.
+
+Each profile's own login is read and sent only to `api.anthropic.com`. ctx
+never renews or writes a login, because renewing rotates the refresh token and
+would log out a `claude` already running in that account. A login that has
+expired shows as expired until `claude` next runs in that profile.
 
 ## Safety
 
@@ -323,6 +347,9 @@ archive or remove it yourself.
 - Linux. Symlink behavior on macOS should work the same way but is untested.
   Without `/proc`, a session or lock holder is recognised by pid alone, not pid
   and start time. Windows is out of scope.
+- `ctx usage` reads logins from `.credentials.json`. On macOS Claude keeps them
+  in the keychain, so there it says so instead of showing numbers. It also
+  relies on the endpoint behind `/usage`, which Anthropic does not document.
 - Two sessions writing the shared `projects/` at once is fine, since transcripts
   are separate files with unique ids.
 - `history.jsonl` is a single append-only file, so two sessions writing it at

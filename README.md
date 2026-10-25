@@ -55,6 +55,21 @@ it under another: it is the same directory on disk.
 Node 20 or newer, on Linux or macOS.
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/rijverse/ctx/main/install.sh | bash
+```
+
+That downloads the source, builds it into `~/.local/share/ctx` and links `ctx`
+into `~/.local/bin`. Run it again to update. `CTX_REF` installs a branch, tag
+or commit other than `main`, and `CTX_INSTALL_DIR` and `CTX_BIN_DIR` move the
+two locations. To uninstall, remove both:
+
+```sh
+rm -rf ~/.local/share/ctx ~/.local/bin/ctx
+```
+
+Coming soon: ctx is not on npm yet. Once it is published, this will work too:
+
+```sh
 npm install -g @rijverse/ctx
 ```
 
@@ -107,7 +122,8 @@ on purpose, holding its own copies, is left alone.
 
 ### Moving an existing machine over
 
-To move an existing machine over, use the script in this repo. It shows the
+To move an existing machine over, use the script in this repo (the install
+script leaves a copy in `~/.local/share/ctx/rollout.sh`). It shows the
 whole plan, asks once, then runs to the end: back up, create the store, fold
 every profile in, share the registry, install the hook. `-n` prints the plan
 and stops.

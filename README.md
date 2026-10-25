@@ -62,11 +62,12 @@ That downloads the source, builds it into `~/.local/share/ctx` and links `ctx`
 into `~/.local/bin`. `CTX_REF` installs a branch, tag or commit other than
 `main`, and `CTX_INSTALL_DIR` and `CTX_BIN_DIR` move the two locations.
 
-To update, run `ctx update`. It checks GitHub for a newer commit on the branch
-you installed from and installs it in place, keeping both locations.
-`ctx update -n` only checks, and `--force` reinstalls even when nothing changed,
-as running the install command again does. A ctx run from a git checkout or
-installed with npm says how to update it instead.
+To update, run `ctx update`. It runs the newest `install.sh` with the branch and
+locations ctx was installed with, and the script installs the newest commit in
+place or says ctx is up to date. Running the install command again does the
+same. `ctx update -n` only checks, and `--force` reinstalls even when nothing
+changed (`CTX_CHECK=1` and `CTX_FORCE=1` for the script). A ctx run from a git
+checkout or installed with npm says how to update it instead.
 
 To uninstall, remove both:
 

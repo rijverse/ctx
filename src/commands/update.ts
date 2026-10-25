@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { tilde } from "../core/paths.js";
 import type { Parsed } from "../util/args.js";
 import { exists, readJson } from "../util/fsx.js";
-import { CtxError, cyan, dim, fail, out, yellow } from "../util/ui.js";
+import { cyan, fail, out, yellow } from "../util/ui.js";
 
 const INSTALL_URL = "https://raw.githubusercontent.com/rijverse/ctx/main/install.sh";
 const TIMEOUT_MS = 15_000;
@@ -41,9 +41,11 @@ export async function update(args: Parsed): Promise<number> {
 }
 
 /**
- * Update an install that install.sh made by running the install.sh of the
- * newest commit on the same ref over it. Any other kind of install is
- * someone else's to update, so it only says how.
+ * Update an install that install.sh made by running the newest install.sh
+ * over it, with the ref and dirs it was installed with. The script decides
+ * whether there is anything to do, the same as running the install command
+ * again would. Any other kind of install is someone else's to update, so it
+ * only says how.
  */
 export async function selfUpdate(root: string, opts: { check: boolean; force: boolean }): Promise<number> {
   const install = await readInstall(root);
@@ -59,44 +61,22 @@ export async function selfUpdate(root: string, opts: { check: boolean; force: bo
     return 1;
   }
 
-  const have = install.commit === null ? "an unknown commit" : short(install.commit);
-  let latest: string | undefined;
-  if (opts.check || !opts.force) {
-    latest = await latestCommit(install);
-    if (latest === install.commit) {
-      out(`ctx is up to date ${dim(`(${have} on ${install.ref})`)}`);
-      return 0;
-    }
-  }
-  if (opts.check) {
-    out(`${short(latest!)} is out on ${install.ref}, this is ${have}. \`ctx update\` installs it.`);
-    return 0;
-  }
-
-  out(`Updating ctx ${have} -> ${latest === undefined ? install.ref : short(latest)}`);
-  // The install.sh of the commit being installed, which may know more than the one that made this install.
-  const script = await download(`https://raw.githubusercontent.com/${install.repo}/${latest ?? install.ref}/install.sh`);
-  return runInstaller(script, { CTX_REF: install.ref, CTX_INSTALL_DIR: root, CTX_BIN_DIR: install.bin });
+  const script = await download(`https://raw.githubusercontent.com/${install.repo}/${install.ref}/install.sh`);
+  return runInstaller(script, {
+    CTX_REF: install.ref,
+    CTX_INSTALL_DIR: root,
+    CTX_BIN_DIR: install.bin,
+    // Set either way, so neither leaks in from the shell.
+    CTX_FORCE: opts.force && !opts.check ? "1" : "",
+    CTX_CHECK: opts.check ? "1" : "",
+  });
 }
 
-async function latestCommit(install: Install): Promise<string> {
-  let text: string;
-  try {
-    text = await download(`https://api.github.com/repos/${install.repo}/commits/${install.ref}`, "application/vnd.github.sha");
-  } catch (e) {
-    if (!(e instanceof CtxError)) throw e;
-    fail(`${e.message}. \`ctx update --force\` installs without checking first.`);
-  }
-  const sha = text.trim();
-  if (!/^[0-9a-f]{40}$/.test(sha)) fail(`GitHub did not name a commit for ${install.ref}`);
-  return sha;
-}
-
-async function download(url: string, accept?: string): Promise<string> {
+async function download(url: string): Promise<string> {
   const host = new URL(url).host;
   let res: Response;
   try {
-    res = await fetch(url, { headers: accept === undefined ? {} : { accept }, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   } catch (e) {
     if ((e as Error).name === "TimeoutError") fail(`${host} did not answer in ${TIMEOUT_MS / 1000}s`);
     const code = ((e as Error).cause as NodeJS.ErrnoException | undefined)?.code;
@@ -121,8 +101,4 @@ function runInstaller(script: string, env: Record<string, string>): Promise<numb
     child.on("close", (code) => resolve(code ?? 1));
     child.stdin.end(script);
   });
-}
-
-function short(commit: string): string {
-  return commit.slice(0, 7);
 }

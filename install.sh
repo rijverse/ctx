@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/rijverse/ctx/main/install.sh | bash
 #
 # Downloads the source, builds it into ~/.local/share/ctx and links ctx into
-# ~/.local/bin. Run it again to update.
+# ~/.local/bin. `ctx update` updates it later, and so does running this again.
 #
 #   CTX_REF          branch, tag or commit to install (default main)
 #   CTX_INSTALL_DIR  where the build goes
@@ -44,11 +44,18 @@ main() {
   fi
 
   mkdir -p "$(dirname "$dir")" "$bin"
+  bin="$(cd "$bin" && pwd)"
   tmp="$(mktemp -d "$(dirname "$dir")/.ctx-install.XXXXXX")"
   trap 'rm -rf "$tmp"' EXIT
 
-  printf 'Downloading %s@%s\n' "$repo" "$ref"
-  curl -fsSL "https://github.com/$repo/archive/$ref.tar.gz" | tar -xz -C "$tmp" --strip-components=1 ||
+  # Pinned to a commit so the install can say what it is, and `ctx update` can
+  # tell when there is something newer. If GitHub will not say, the ref itself
+  # is downloaded and the commit stays unknown.
+  commit="$(curl -fsSL -H 'Accept: application/vnd.github.sha' "https://api.github.com/repos/$repo/commits/$ref" 2>/dev/null || true)"
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || commit=""
+
+  printf 'Downloading %s@%s%s\n' "$repo" "$ref" "${commit:+ (${commit:0:7})}"
+  curl -fsSL "https://github.com/$repo/archive/${commit:-$ref}.tar.gz" | tar -xz -C "$tmp" --strip-components=1 ||
     stop "could not download $ref from github.com/$repo."
 
   # Chained with && because set -e does not apply on the left of ||.
@@ -58,6 +65,11 @@ main() {
     npm run build --silent &&
     npm prune --omit=dev --no-audit --no-fund --loglevel=error >/dev/null) ||
     stop "the build failed. Nothing was installed."
+
+  node -e '
+    const [file, repo, ref, commit, bin] = process.argv.slice(1);
+    require("fs").writeFileSync(file, JSON.stringify({ repo, ref, commit: commit || null, bin }, null, 2) + "\n");
+  ' "$tmp/install.json" "$repo" "$ref" "$commit" "$bin"
 
   # Build next to the old install and swap at the end, so a failed update
   # leaves the working one alone.

@@ -8,6 +8,7 @@ import { registry } from "./commands/registry.js";
 import { runProfile, which } from "./commands/run.js";
 import { status } from "./commands/status.js";
 import { detach, sync } from "./commands/sync.js";
+import { ownRoot, readInstall, update } from "./commands/update.js";
 import { planUsage } from "./commands/usage.js";
 import { parseArgs, type Parsed } from "./util/args.js";
 import { bold, CtxError, dim, err, out, red, silenceBrokenPipe } from "./util/ui.js";
@@ -26,6 +27,7 @@ const COMMANDS: Record<string, Handler> = {
   doctor,
   run: runProfile,
   usage: planUsage,
+  update,
   which,
   registry,
   hooks,
@@ -57,6 +59,7 @@ function usage(): void {
   out(`  hooks <status|install|uninstall>`);
   out(`                                  fold sessions you did not start with \`ctx run\` into the store`);
   out(`  which [profile]                 print the CLAUDE_CONFIG_DIR export for a profile`);
+  out(`  update [-n] [--force]           update ctx to the latest commit, -n only checks`);
   out();
   out(bold("Flags"));
   out(`  -n, --dry-run   print the plan, change nothing`);
@@ -81,7 +84,8 @@ async function main(): Promise<number> {
     return name === undefined ? 1 : 0;
   }
   if (name === "version" || args.flags.has("version")) {
-    out(VERSION);
+    const commit = (await readInstall(await ownRoot()))?.commit;
+    out(commit ? `${VERSION} (${commit.slice(0, 7)})` : VERSION);
     return 0;
   }
 

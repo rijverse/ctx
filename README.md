@@ -59,9 +59,16 @@ curl -fsSL https://raw.githubusercontent.com/rijverse/ctx/main/install.sh | bash
 ```
 
 That downloads the source, builds it into `~/.local/share/ctx` and links `ctx`
-into `~/.local/bin`. Run it again to update. `CTX_REF` installs a branch, tag
-or commit other than `main`, and `CTX_INSTALL_DIR` and `CTX_BIN_DIR` move the
-two locations. To uninstall, remove both:
+into `~/.local/bin`. `CTX_REF` installs a branch, tag or commit other than
+`main`, and `CTX_INSTALL_DIR` and `CTX_BIN_DIR` move the two locations.
+
+To update, run `ctx update`. It checks GitHub for a newer commit on the branch
+you installed from and installs it in place, keeping both locations.
+`ctx update -n` only checks, and `--force` reinstalls even when nothing changed,
+as running the install command again does. A ctx run from a git checkout or
+installed with npm says how to update it instead.
+
+To uninstall, remove both:
 
 ```sh
 rm -rf ~/.local/share/ctx ~/.local/bin/ctx
@@ -263,6 +270,7 @@ save. Pulling stays the job of `ctx run`.
 | `ctx registry <show\|pull\|push\|diff>` | Drive the `.claude.json` split by hand. |
 | `ctx hooks <status\|install\|uninstall>` | Wire sessions you did not start with `ctx run` into the store. |
 | `ctx which [profile]` | Print the `CLAUDE_CONFIG_DIR` export for a profile. |
+| `ctx update [-n] [--force]` | Update ctx to the newest commit on the branch it was installed from. |
 
 Flags: `-n/--dry-run`, `-y/--yes`, `-v/--verbose`, `--json`, `--only a,b`,
 `--store <path>`.
